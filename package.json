@@ -1,11 +1,11 @@
 {
   "name": "pi-router",
-  "version": "0.1.0",
-  "description": "Minimal superagent (Router) extension for Pi — decompose goals, dispatch workers, track via .pi/router ledger",
+  "version": "0.2.0",
+  "description": "Minimal superagent (Router) extension for Pi — global memory, read-only main session, and visible workers",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/store.test.ts"
+    "test": "node --test test/store.test.ts test/guard.test.ts test/config.test.ts test/workers.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

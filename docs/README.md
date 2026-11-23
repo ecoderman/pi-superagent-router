@@ -3,5 +3,9 @@
 - `BRIEF.md` — v1 需求（已交付，v0.1.0）
 - `BRIEF-v2.md` — v2 需求（当前）
 - `PLAN.md` — v1 实施计划
+- `PLAN-v2.md` — v2 实施计划
 - `API-NOTES.md` — pi 扩展 API 速查
 - `FIXES-1.md` — v1 第一轮返修记录
+- `FIXES-v2-1.md` — v2 第一轮返修记录
+- `FIXES-v2-2.md` — v2 第二轮返修记录
+- `REVIEW-v2.md` — v2 三轮审查 + 最终验收合并记录（含 supervisor 复跑与冒烟结果）
