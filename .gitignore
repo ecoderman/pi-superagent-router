@@ -1,0 +1,5 @@
+node_modules/
+.pi/
+tasks.json.bak-*
+models.json.bak-*
+*.log
