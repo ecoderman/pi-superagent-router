@@ -114,8 +114,13 @@ digest / list 在读路径上也能立刻看到旧任务（内存导入，不落
 ## Worker 可见性
 
 - 派活后不必手写 `runId`：`subagent` 成功的 `tool_result` 会自动提取
-  `details.runId` / `details.runs[0].runId` / `details.childRunId`，只在账本里恰好一个
-  「queued 且无 runId」的候选时写入并置 `running`；歧义时不猜、静默跳过。
+  `details.runId` / `details.runs[0].runId` / `details.childRunId`，再按以下规则绑定到账本任务：
+  1. 候选 = `queued` 且无 `runId` 的任务；只有一个就直接绑定；
+  2. 多个时优先匹配派发文本里包含其 `goal` 的候选（忽略大小写/空白；`goal` 少于 8 字符不参与）；
+  3. 仍无法区分则取**最新创建**的候选，并把「绑给了谁」追加到工具结果里告知模型。
+  绑定时任务置 `running`。候选为 0（或任务已有 `runId`）则不动作。
+- 注意：这条启发式在「先开很多任务、再逐个派发」的极端并行下可能绑错；需要精确控制时
+  显式调 `router_task_update { id, runId }` 覆盖即可（后写生效）。
 - `router_workers { status?: "active" | "done" | "all" }`（默认 `active`）列出 worker 的
   runId、state、session 路径与最后一条报告。运行目录发现顺序（逐个 `stat`，取第一个存在的）：
   1. `PI_SUBAGENTS_RUN_DIR`（显式覆盖；它本身或其 `async-subagent-runs` 子目录）

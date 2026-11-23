@@ -10,6 +10,8 @@ const TERMINAL: readonly TaskStatus[] = ["done", "failed", "stopped"];
 
 const DEFAULT_LOCK_TIMEOUT_MS = 3000;
 const DEFAULT_LOCK_STALE_MS = 10_000;
+/** goal 少于这个长度时不用来做派发文本匹配，避免短词误命中。 */
+const MIN_GOAL_FOR_MATCH = 8;
 const BACKOFF_START_MS = 25;
 const BACKOFF_MAX_MS = 200;
 
@@ -682,14 +684,64 @@ export function applyOpen(ledger: Ledger, input: OpenInput): { task: Task; creat
  * tool_result 自动记 runId：仅当账本里恰好一个「queued 且无 runId」的候选时写入。
  * 0 或 >1 个候选一律不猜。
  */
-export function setRunIdIfUnclaimed(ledger: Ledger, runId: string): Task | undefined {
+/**
+ * 把 `subagent` 返回的 runId 绑定到最可能对应的任务。
+ *
+ * 规则（v2.1）：
+ * 1. 候选 = `queued` 且无 `runId` 的任务；没有候选则不绑定。
+ * 2. 唯一候选 → 直接绑定（`single`）。
+ * 3. 多个候选时，优先用派发文本匹配 `goal`（忽略大小写与空白；`goal` 少于 8 字符不参与以免误匹配），
+ *    命中唯一则用 `goal`，命中多个取其中最新创建者。
+ * 4. 仍无法区分 → 取最新创建的候选（`newest`），并把规则告知调用方以便提示模型。
+ */
+export type RunIdRule = "single" | "goal" | "newest";
+
+export interface RunIdBinding {
+  task: Task;
+  rule: RunIdRule;
+}
+
+function normalizeForMatch(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function newestFirst(a: Task, b: Task): number {
+  const at = b.createdAt.localeCompare(a.createdAt);
+  if (at !== 0) return at;
+  return b.id.localeCompare(a.id, undefined, { numeric: true });
+}
+
+export function bindRunId(ledger: Ledger, runId: string, taskText?: string): RunIdBinding | undefined {
   const candidates = ledger.tasks.filter((t) => t.status === "queued" && t.runId === undefined);
-  if (candidates.length !== 1) return undefined;
-  const task = candidates[0];
-  task.runId = runId;
-  task.status = "running";
-  task.updatedAt = new Date().toISOString();
-  return task;
+  if (candidates.length === 0) return undefined;
+
+  let picked: Task | undefined;
+  let rule: RunIdRule = "single";
+
+  if (candidates.length === 1) {
+    picked = candidates[0];
+  } else {
+    const haystack = taskText === undefined ? "" : normalizeForMatch(taskText);
+    const matched =
+      haystack === ""
+        ? []
+        : candidates.filter((t) => {
+            const goal = normalizeForMatch(t.goal);
+            return goal.length >= MIN_GOAL_FOR_MATCH && haystack.includes(goal);
+          });
+    if (matched.length > 0) {
+      picked = [...matched].sort(newestFirst)[0];
+      rule = "goal";
+    } else {
+      picked = [...candidates].sort(newestFirst)[0];
+      rule = "newest";
+    }
+  }
+
+  picked.runId = runId;
+  picked.status = "running";
+  picked.updatedAt = new Date().toISOString();
+  return { task: picked, rule };
 }
 
 export interface ReportInput {

@@ -25,7 +25,7 @@ import {
   sameProject,
   readMemory,
   saveLedger,
-  setRunIdIfUnclaimed,
+  bindRunId,
   tasksPath,
   withLedger,
   withLock,
@@ -487,26 +487,63 @@ test("stale lock is taken over once and released", async () => {
   }
 });
 
-test("setRunIdIfUnclaimed only writes when exactly one queued task has no runId", () => {
+test("bindRunId binds the only queued task, ignores non-candidates, and never steals a bound task", () => {
   const single = emptyLedger();
   applyOpen(single, openInput("a", "cwd"));
-  const claimed = setRunIdIfUnclaimed(single, "run-1");
-  assert.equal(claimed?.id, "t1");
+  const claimed = bindRunId(single, "run-1");
+  assert.equal(claimed?.task.id, "t1");
+  assert.equal(claimed?.rule, "single");
   assert.equal(single.tasks[0].runId, "run-1");
   assert.equal(single.tasks[0].status, "running");
-
-  const ambiguous = emptyLedger();
-  applyOpen(ambiguous, openInput("a", "cwd"));
-  applyOpen(ambiguous, openInput("b", "cwd"));
-  assert.equal(setRunIdIfUnclaimed(ambiguous, "run-2"), undefined);
-  assert.equal(ambiguous.tasks.some((t) => t.runId !== undefined), false);
 
   const already = emptyLedger();
   applyOpen(already, openInput("a", "cwd"));
   applyUpdate(already, "t1", { runId: "manual" });
-  assert.equal(setRunIdIfUnclaimed(already, "run-3"), undefined);
+  assert.equal(bindRunId(already, "run-3"), undefined);
   assert.equal(already.tasks[0].runId, "manual");
   assert.equal(already.tasks[0].status, "queued");
+
+  const none = emptyLedger();
+  assert.equal(bindRunId(none, "run-4"), undefined);
+});
+
+test("bindRunId prefers a goal match in the dispatch text over recency", () => {
+  const ledger = emptyLedger();
+  applyOpen(ledger, openInput("older", "cwd"));
+  applyOpen(ledger, openInput("newer", "cwd"));
+  ledger.tasks[0].goal = "学完机器学习课程并产出章节笔记";
+  ledger.tasks[1].goal = "整理一份季度财务复盘报告";
+  // older 的 createdAt 更早，确保 recency 规则会选 newer
+  ledger.tasks[0].createdAt = "2026-01-01T00:00:00.000Z";
+  ledger.tasks[1].createdAt = "2026-02-01T00:00:00.000Z";
+
+  const byGoal = bindRunId(ledger, "run-goal", "请在 book/ 下继续，目标是：学完机器学习课程并产出章节笔记");
+  assert.equal(byGoal?.task.id, "t1");
+  assert.equal(byGoal?.rule, "goal");
+  assert.equal(ledger.tasks[0].status, "running");
+  assert.equal(ledger.tasks[1].runId, undefined);
+});
+
+test("bindRunId falls back to the newest queued task and reports the rule", () => {
+  const ledger = emptyLedger();
+  applyOpen(ledger, openInput("older", "cwd"));
+  applyOpen(ledger, openInput("newer", "cwd"));
+  ledger.tasks[0].createdAt = "2026-01-01T00:00:00.000Z";
+  ledger.tasks[1].createdAt = "2026-02-01T00:00:00.000Z";
+
+  const bound = bindRunId(ledger, "run-newest", "some dispatch text without a matching goal");
+  assert.equal(bound?.task.id, "t2");
+  assert.equal(bound?.rule, "newest");
+
+  const shortGoals = emptyLedger();
+  applyOpen(shortGoals, openInput("a", "cwd", "写笔记"));
+  applyOpen(shortGoals, openInput("b", "cwd", "写报告"));
+  shortGoals.tasks[0].createdAt = "2026-01-01T00:00:00.000Z";
+  shortGoals.tasks[1].createdAt = "2026-02-01T00:00:00.000Z";
+  // goal 少于 8 字符不参与匹配，因此即便派发文本包含「写笔记」也走 newest
+  const shortBound = bindRunId(shortGoals, "run-short", "去做写笔记那件事");
+  assert.equal(shortBound?.task.id, "t2");
+  assert.equal(shortBound?.rule, "newest");
 });
 
 test("projectName normalises realpath and falls back to the raw cwd", async () => {

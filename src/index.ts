@@ -14,7 +14,7 @@ import {
   projectName,
   projectRouterDir,
   readMemory,
-  setRunIdIfUnclaimed,
+  bindRunId,
   tasksPath,
   withLedger,
   type UpdatePatch,
@@ -566,9 +566,25 @@ export default function piRouter(pi: ExtensionAPI): void {
     if (event.isError) return;
     const runId = extractRunId(event.details);
     if (!runId) return;
+    const taskText = typeof event.input.task === "string" ? event.input.task : undefined;
     try {
       const st = await ensureState(ctx);
-      await withLedger(st.home, (ledger) => setRunIdIfUnclaimed(ledger, runId), { legacy: st.legacy });
+      const bound = await withLedger(
+        st.home,
+        (ledger) => bindRunId(ledger, runId, taskText),
+        { legacy: st.legacy },
+      );
+      const binding = bound.result;
+      if (!binding) return;
+      // 非唯一候选的绑定告诉模型一声，避免它以为 runId 没记上而重复派发或手工补录。
+      if (binding.rule === "single") return;
+      const why = binding.rule === "goal" ? "按派发文本匹配 goal" : "多个待派发任务，取最新创建者";
+      return {
+        content: [
+          ...event.content,
+          { type: "text" as const, text: `\n[router] runId 已自动绑定到 ${binding.task.id}（${why}）。` },
+        ],
+      };
     } catch {
       // 自动记账失败绝不改变 subagent 结果，也不打扰模型。
     }
