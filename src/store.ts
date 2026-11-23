@@ -1,11 +1,31 @@
-import { appendFile, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import type { Ledger, Report, ReportStatus, Task, TaskStatus } from "./types.ts";
+import type { Ledger, Report, ReportReason, ReportStatus, Task, TaskStatus } from "./types.ts";
+import {
+  appendSessionNote,
+  emptySession,
+  formatAuditLine,
+  parseAuditLine,
+  parseMemoryBlocks,
+  parseSessionState,
+  serializeSession,
+  validateMemoryTarget,
+  type AuditLine,
+  type SessionState,
+} from "./memory.ts";
 
 const TASK_STATUSES: readonly TaskStatus[] = ["queued", "running", "needs-human", "done", "failed", "stopped"];
 const REPORT_STATUSES: readonly ReportStatus[] = ["progress", "blocked", "ready", "failed", "dropped"];
+export const REPORT_REASONS: readonly ReportReason[] = [
+  "user_request",
+  "blocked_question",
+  "rework",
+  "superseded",
+  "promoted",
+  "other",
+];
 const TERMINAL: readonly TaskStatus[] = ["done", "failed", "stopped"];
 
 const DEFAULT_LOCK_TIMEOUT_MS = 3000;
@@ -31,6 +51,30 @@ export function tasksPath(home: string): string {
 
 export function memoryPath(home: string): string {
   return join(home, "memory.md");
+}
+
+export function globalMemoryPath(home: string): string {
+  return join(home, "global.md");
+}
+
+export function projectsDir(home: string): string {
+  return join(home, "projects");
+}
+
+export function projectMemoryPath(home: string, project: string): string {
+  return join(projectsDir(home), `${project}.md`);
+}
+
+export function sessionsDir(home: string): string {
+  return join(home, "sessions");
+}
+
+export function sessionPath(home: string, sessionId: string): string {
+  return join(sessionsDir(home), `${sessionId}.json`);
+}
+
+export function auditPath(home: string): string {
+  return join(home, "audit.jsonl");
 }
 
 export function lockPath(home: string): string {
@@ -72,6 +116,10 @@ function isReportStatus(value: unknown): value is ReportStatus {
   return typeof value === "string" && (REPORT_STATUSES as readonly string[]).includes(value);
 }
 
+function isReportReason(value: unknown): value is ReportReason {
+  return typeof value === "string" && (REPORT_REASONS as readonly string[]).includes(value);
+}
+
 function requireString(record: Record<string, unknown>, key: string, where: string): string {
   const value = record[key];
   if (typeof value !== "string") throw new TypeError(`${where}: ${key} must be a string`);
@@ -110,6 +158,8 @@ function parseReport(raw: unknown, where: string): Report {
   const report: Report = { at, status, summary };
   const question = optionalString(raw, "question", where);
   if (question !== undefined) report.question = question;
+  // reason 可选；未知值按 PLAN-v3 §7 忽略（不回退到抛错，保持旧账本可读）。
+  if (raw.reason !== undefined && isReportReason(raw.reason)) report.reason = raw.reason;
   return report;
 }
 
@@ -748,6 +798,7 @@ export interface ReportInput {
   status: ReportStatus;
   summary: string;
   question?: string;
+  reason?: ReportReason;
 }
 
 export interface UpdatePatch {
@@ -769,6 +820,7 @@ export function applyUpdate(ledger: Ledger, id: string, patch: UpdatePatch): Tas
       summary: patch.report.summary,
     };
     if (patch.report.question !== undefined) report.question = patch.report.question;
+    if (patch.report.reason !== undefined) report.reason = patch.report.reason;
     task.reports.push(report);
   }
   if (patch.status !== undefined) task.status = patch.status;
@@ -777,4 +829,247 @@ export function applyUpdate(ledger: Ledger, id: string, patch: UpdatePatch): Tas
   if (patch.next !== undefined) task.next = patch.next;
   task.updatedAt = new Date().toISOString();
   return task;
+}
+
+export const SESSION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+export async function readGlobalMemory(home: string): Promise<string> {
+  try {
+    return await readFile(globalMemoryPath(home), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+export async function readProjectMemory(home: string, project: string): Promise<string> {
+  try {
+    return await readFile(projectMemoryPath(home, project), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+export async function readSession(home: string, sessionId: string): Promise<SessionState | undefined> {
+  let text: string;
+  try {
+    text = await readFile(sessionPath(home, sessionId), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  try {
+    return parseSessionState(JSON.parse(text) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+async function saveSessionUnlocked(home: string, state: SessionState): Promise<void> {
+  await mkdir(sessionsDir(home), { recursive: true });
+  const target = sessionPath(home, state.sessionId);
+  const tmp = join(sessionsDir(home), `.${state.sessionId}.${process.pid}.${randomUUID()}.tmp`);
+  const payload = serializeSession(state);
+  try {
+    await writeFile(tmp, payload, "utf8");
+    await saveLedgerWithRetry(target, payload, tmp);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
+export async function writeSessionLocked(
+  home: string,
+  state: SessionState,
+  options?: LockOptions,
+): Promise<void> {
+  validateMemoryTarget({ scope: "session", scopeId: state.sessionId });
+  await withLock(home, () => saveSessionUnlocked(home, state), options);
+}
+
+export async function appendSessionNoteLocked(
+  home: string,
+  sessionId: string,
+  project: string,
+  text: string,
+  focus?: string,
+  options?: LockOptions,
+): Promise<SessionState> {
+  validateMemoryTarget({ scope: "session", scopeId: sessionId });
+  return withLock(
+    home,
+    async () => {
+      const current = (await readSession(home, sessionId)) ?? emptySession(sessionId, project);
+      const next = appendSessionNote(current, text, focus);
+      await saveSessionUnlocked(home, next);
+      return next;
+    },
+    options,
+  );
+}
+
+/** session_start 时删除 sessions/*.json 中 mtime 超过 maxAgeMs 的文件；删除失败忽略。 */
+export async function pruneSessions(home: string, maxAgeMs: number = SESSION_MAX_AGE_MS): Promise<void> {
+  await withLock(home, async () => {
+    const dir = sessionsDir(home);
+    await mkdir(dir, { recursive: true });
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.endsWith(".json")) continue;
+      const path = join(dir, entry);
+      try {
+        const info = await stat(path);
+        if (now - info.mtimeMs > maxAgeMs) await rm(path, { force: true });
+      } catch {
+        // 删除失败忽略
+      }
+    }
+  });
+}
+
+export async function appendAudit(home: string, line: AuditLine): Promise<void> {
+  try {
+    await mkdir(home, { recursive: true });
+    await appendFile(auditPath(home), `${formatAuditLine(line)}\n`, "utf8");
+  } catch {
+    // 审计失败静默，不影响主流程
+  }
+}
+
+export async function readAudit(
+  home: string,
+  opts?: { project?: string; limit?: number },
+): Promise<AuditLine[]> {
+  let text: string;
+  try {
+    text = await readFile(auditPath(home), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  const lines: AuditLine[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    if (raw.trim() === "") continue;
+    try {
+      const parsed = parseAuditLine(JSON.parse(raw) as unknown);
+      if (parsed) lines.push(parsed);
+    } catch {
+      // 坏行跳过
+    }
+  }
+
+  let result = lines;
+  const projectFilter = opts?.project;
+  if (projectFilter !== undefined) {
+    const needle = projectFilter.toLowerCase();
+    result = result.filter((line) => line.project.toLowerCase() === needle);
+  }
+  if (opts?.limit !== undefined) {
+    const n = Math.max(0, Math.trunc(opts.limit));
+    result = n === 0 ? [] : result.slice(-n);
+  }
+  return result;
+}
+
+export async function appendGlobalMemoryLocked(home: string, text: string, options?: LockOptions): Promise<void> {
+  await withLock(
+    home,
+    async () => {
+      await mkdir(home, { recursive: true });
+      await appendFile(globalMemoryPath(home), `${text}\n`, "utf8");
+    },
+    options,
+  );
+}
+
+export async function appendProjectMemoryLocked(
+  home: string,
+  project: string,
+  text: string,
+  options?: LockOptions,
+): Promise<void> {
+  validateMemoryTarget({ scope: "project", scopeId: project });
+  await withLock(
+    home,
+    async () => {
+      await mkdir(projectsDir(home), { recursive: true });
+      await appendFile(projectMemoryPath(home, project), `${text}\n`, "utf8");
+    },
+    options,
+  );
+}
+
+export interface MigrateMemoryResult {
+  warning?: string;
+}
+
+/**
+ * 把 v2 单一 memory.md 拆成 global.md / projects/*.md。
+ * 锁内执行；原文件只在全部写入成功后改名（幂等）；失败保留原文件并返回 warning。
+ */
+export async function migrateMemory(home: string, options?: LockOptions): Promise<MigrateMemoryResult> {
+  const legacy = memoryPath(home);
+  try {
+    await readFile(legacy, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return {};
+    return { warning: `memory.md 读取失败（${(error as Error).message}），迁移未执行` };
+  }
+
+  try {
+    await withLock(
+      home,
+      async () => {
+        let text: string;
+        try {
+          text = await readFile(legacy, "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+          throw error;
+        }
+
+        const { global, projects } = parseMemoryBlocks(text);
+        // 防止 [project] 标签里的 ../ 或路径分隔符把块写到 <home> 之外；任何非法标签都失败并保留原文件。
+        for (const project of Object.keys(projects)) {
+          validateMemoryTarget({ scope: "project", scopeId: project });
+        }
+        const globalCount = global.length;
+        const projectCount = Object.values(projects).reduce((n, blocks) => n + blocks.length, 0);
+        const total = globalCount + projectCount;
+        const iso = new Date().toISOString();
+        const marker = `<!-- migrated from memory.md at ${iso} -->`;
+
+        if (global.length > 0) {
+          await mkdir(home, { recursive: true });
+          await appendFile(globalMemoryPath(home), `${global.join("\n\n")}\n\n${marker}\n`, "utf8");
+        }
+        for (const [project, blocks] of Object.entries(projects)) {
+          await mkdir(projectsDir(home), { recursive: true });
+          await appendFile(projectMemoryPath(home, project), `${blocks.join("\n\n")}\n\n${marker}\n`, "utf8");
+        }
+
+        await rename(legacy, `${legacy}.migrated-${Date.now()}`);
+        await appendAudit(home, {
+          at: iso,
+          session: "unknown",
+          project: "unknown",
+          kind: "migrate",
+          text: `imported ${total} blocks (global ${globalCount}, project ${projectCount})`,
+        });
+      },
+      options,
+    );
+    return {};
+  } catch (error) {
+    return { warning: `memory.md 迁移失败（${(error as Error).message}），原文件保留` };
+  }
 }

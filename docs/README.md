@@ -12,3 +12,4 @@
 - `FIXES-v2-1.md` — v2 第一轮返修记录
 - `FIXES-v2-2.md` — v2 第二轮返修记录
 - `REVIEW-v2.md` — v2 三轮审查 + 最终验收合并记录（含 supervisor 复跑与冒烟结果）
+- `REVIEW-v3.md` — v3 三轮审查 + supervisor 复核与冒烟记录

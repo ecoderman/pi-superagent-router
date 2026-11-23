@@ -1,11 +1,19 @@
 export type TaskStatus = "queued" | "running" | "needs-human" | "done" | "failed" | "stopped";
 export type ReportStatus = "progress" | "blocked" | "ready" | "failed" | "dropped";
+export type ReportReason =
+  | "user_request"
+  | "blocked_question"
+  | "rework"
+  | "superseded"
+  | "promoted"
+  | "other";
 
 export interface Report {
   at: string;
   status: ReportStatus;
   summary: string;
   question?: string;
+  reason?: ReportReason;
 }
 
 export interface Task {

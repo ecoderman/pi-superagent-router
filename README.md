@@ -8,16 +8,18 @@
 
 ## 它做什么
 
-- 7 个工具：
+- 9 个工具：
   - v1 记账：`router_task_open` / `router_task_update` / `router_task_list` /
     `router_memory_append` / `router_memory_read`
   - v2 只读与可见性：`router_inspect`（git-status / git-log / git-diff / tree）、
     `router_workers`（worker 的 runId / 状态 / session 路径）
-- 注入路由规则与「全局统计 + 当前项目明细」digest 到系统提示。
-- `/router` 命令：`status` / `tasks` / `task <id>` / `memory [query]` / `digest` /
-  **`new <目标>`**（自己开任务，等于把目标交给 Router 走完整流程）/ **`spawn <id>`**（手动派发一个 `queued` 任务）。
-- 账本 = 全局 `~/.pi/agent/router/tasks.json`（结构化事实）+ `~/.pi/agent/router/memory.md`
-  （append-only 决策记录，块头带 `[project]` 标记）。
+  - v3 分层记忆：`router_note`（写当前会话短时记忆）、`router_task_get`（digest 里
+    `read: task/<id>` 指针的目标）
+- 注入路由规则与分层记忆（global → project → session → open tasks）到系统提示。
+- `/router` 命令：`status` / `tasks` / `task <id>` / `memory [scope] [query]` / `digest` /
+  **`new <目标>`** / **`spawn <id>`** / **`promote <行号> [global|project]`** / **`session`**。
+- 账本 = 全局 `~/.pi/agent/router/tasks.json`（结构化事实）；记忆拆成四层：
+  `global.md`、`projects/<project>.md`、`sessions/<sessionId>.json`、`audit.jsonl`。
 
 ## 安装
 
@@ -50,7 +52,7 @@ Router 会话被三层限制，不只是提示词约束：
 
 1. **工具白名单**：`session_start`（含 new/resume/fork/reload）与每轮 `before_agent_start`
    都会 `pi.setActiveTools(KEEP)`，Router 只保留
-   `read`、`grep`、`find`、`ls`、`subagent`、7 个 `router_*` 工具。
+   `read`、`grep`、`find`、`ls`、`subagent`、9 个 `router_*` 工具。
 2. **`router_inspect` 替代 bash**：固定 argv，只接受 `git-status` / `git-log` / `git-diff` / `tree`，
    不接受自由字符串与 shell 元字符；`limit` 夹在 1..500。
 3. **`tool_call` 拦截兜底**：任何 `write*` / `edit*` / `apply*` / `bash` / `powershell`
@@ -61,22 +63,70 @@ Router 会话被三层限制，不只是提示词约束：
 
 子会话（`PI_SUBAGENT_CHILD=1`）不加载本扩展，也不受这些限制。
 
+## 记忆分层（v3）
+
+记忆不再是一份 `memory.md`，而是四个存储位置（`<home>` 即账本根目录）：
+
+| 层 | 路径 | 写入方 |
+|---|---|---|
+| 全局 | `global.md` | 人写 / `/router promote` 晋升；模型只读 |
+| 项目 | `projects/<project>.md` | 人写 / `/router promote` 晋升；模型只读 |
+| 会话 | `sessions/<sessionId>.json` | 模型可写（`router_note`）；会话启动清理 7 天前旧文件 |
+| 审计 | `audit.jsonl` | 扩展代码 append-only；模型只读 |
+
+注入系统提示前由 `assembleMemory` 组装成固定四段：`## global → ## project <name> →
+## session → ## open tasks`。每层独立预算（默认 `global 800 / project 1200 / session 600 /
+tasks 1400` 字符），总量封顶 4096 字符 / 60 行，末尾有一行
+`budget: global X/800 · project X/1200 · session X/600 · tasks X/1400` 告诉模型被剪了多少。
+tasks 层每行末尾追加 ` · read: task/<id>`，需要看完整任务就用 `router_task_get` 读取。
+
+## 写权限（v3）
+
+Router 的写能力按域收口：
+
+- 模型只能写 **session 层**（`router_note`）与 **审计**（`router_memory_append`）。
+- `router_memory_append` 语义已改变：只把 `kind:"note"` 追加到 `audit.jsonl`，**绝不写 global/project**。
+- `global.md` / `projects/*.md` 只能由人写或通过 `/router promote` 晋升，模型永远只读。
+- 所有文件写路径（任务、会话、晋升、迁移）都走 `tasks.lock`；审计是单行 `appendFile`（失败静默，不影响主流程）。
+
+## /router promote
+
+模型把值得长期保留的审计内容交给人确认，由人执行：
+
+```text
+/router promote <audit行号> [global|project]
+```
+
+- `<audit行号>` 从 1 开始，**倒序计数**（1 = 最新一行）。
+- 目标缺省 `project`（追加到 `projects/<project>.md`）；`global` 追加到 `global.md`。
+- 写入走文件锁，成功后 `notify`，并再写一条 `kind:"promote"` 审计。
+
 ## 账本位置与全局记忆
 
 | 内容 | 默认路径 |
 |---|---|
 | 账本 | `~/.pi/agent/router/tasks.json` |
-| 记忆 | `~/.pi/agent/router/memory.md` |
+| 全局记忆 | `~/.pi/agent/router/global.md` |
+| 项目记忆 | `~/.pi/agent/router/projects/<project>.md` |
+| 会话记忆 | `~/.pi/agent/router/sessions/<sessionId>.json` |
+| 审计 | `~/.pi/agent/router/audit.jsonl` |
 | 锁 | `~/.pi/agent/router/tasks.lock` |
 | 配置 | `~/.pi/agent/router.json` |
 
 - 每个任务记录 `project`（`basename(realpath(cwd))`，同一物理项目不同层级路径归一）与
   `ownerSession`（创建它的会话 id），因此同一份账本能服务所有项目。
-- 所有写路径（open / update / memory append / 迁移 / 自动记 runId）都在文件锁内执行：
+- 所有写路径（open / update / 会话 note / 晋升 / 迁移 / 自动记 runId）都在文件锁内执行：
   `tasks.lock` 用 `open(..., "wx")` 独占创建，25ms→200ms 指数退避、3s 超时、mtime 超过 10s
   视为陈旧并接管一次。读路径（digest / list / 命令）不取锁，接受最终一致。
 - 写入是 temp + rename 原子替换；损坏账本会在**写路径的锁内**备份为 `tasks.json.bak-<ts>` 并以空账本继续，
   读路径（digest / list）只报 warning、不改盘。
+
+### v2 → v3 记忆迁移
+
+首次访问时，旧的 `memory.md` 会被拆分：带 `[project]` 的块落到
+`projects/<project>.md`，不带 `[project]` 的块落到 `global.md`；原文保留，原文件改名为
+`memory.md.migrated-<ts>`（不删除），并写一条 `kind:"migrate"` 审计。迁移幂等；解析失败时
+保留原文件并返回 warning，不丢数据。
 
 ### 覆盖账本根目录
 
@@ -138,7 +188,7 @@ digest / list 在读路径上也能立刻看到旧任务（内存导入，不落
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test：store / guard / config / workers 四个文件
+npm test            # node:test：store / guard / config / workers / memory 五个文件
 ```
 
 扩展由 Pi 直接加载 TypeScript（无构建步骤）；`tsconfig.json` 只用于类型检查。

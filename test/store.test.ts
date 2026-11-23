@@ -128,6 +128,33 @@ test("report append keeps ISO timestamps and question", () => {
   assert.ok(!Number.isNaN(Date.parse(task.updatedAt)));
 });
 
+test("report reason round-trips and legacy reports without reason stay readable", async () => {
+  const home = await newHome();
+  try {
+    const ledger = emptyLedger();
+    const { task } = applyOpen(ledger, openInput("k", "cwd"));
+    applyUpdate(ledger, task.id, {
+      report: { status: "blocked", summary: "need input", reason: "blocked_question" },
+    });
+    await saveLedger(home, ledger);
+
+    const { ledger: restored } = await loadLedger(home);
+    assert.equal(restored.tasks[0].reports[0].reason, "blocked_question");
+
+    type LedgerShape = { tasks: { reports: Record<string, unknown>[] }[] };
+    const legacy = JSON.parse(JSON.stringify(restored)) as LedgerShape;
+    delete legacy.tasks[0].reports[0].reason;
+    const parsedLegacy = parseLedger(legacy as unknown);
+    assert.equal(parsedLegacy.tasks[0].reports[0].reason, undefined);
+
+    const unknown = JSON.parse(JSON.stringify(restored)) as LedgerShape;
+    unknown.tasks[0].reports[0].reason = "bogus";
+    assert.equal(parseLedger(unknown as unknown).tasks[0].reports[0].reason, undefined, "未知 reason 忽略不回退");
+  } finally {
+    await cleanup(home);
+  }
+});
+
 test("digest keeps global + project stats, project detail and the 40 line / 4096 char caps", () => {
   const ledger = emptyLedger();
   for (let i = 0; i < 30; i += 1) {

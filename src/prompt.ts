@@ -11,7 +11,7 @@ export const ROUTER_RULES = [
   "报告到达后只做三件事：router_task_update 记账 → 决定下一步 → 必要时向人汇报。",
   "不 sleep、不轮询、不反复查 status；子代理完成会自动唤醒会话。",
   "只有 blocked / 需要人决策时才打扰用户；progress 不转述。",
-  "每个重要决定写一行理由到 memory.md（为什么这样拆、为什么换方案）。",
+  "每个重要决定只写 session/audit，不写 global/project：用 router_note 写会话短时记忆，或用 router_memory_append 写审计理由；要长期保留就请用户执行 `/router promote`。",
   "交付前先 router_task_list 确认没有遗漏的 open 任务。",
 ].join("\n");
 
@@ -39,11 +39,21 @@ function byCreatedThenId(a: Task, b: Task): number {
   return idOrder(a.id) - idOrder(b.id);
 }
 
-function taskRow(task: Task): string {
+/** digest 明细行格式，v3 assembleMemory 的 tasks 层复用（每行尾追加 read: 指针）。 */
+export function taskRow(task: Task): string {
   const last = lastReport(task);
   const lastS = last ? `${last.status} ${clip(last.summary, 60)}` : "-";
   const nextS = task.next && task.next.length > 0 ? clip(task.next, 60) : "-";
   return `${task.id} [${task.status}] ${clip(task.key, 40)} — ${clip(task.goal, 80)} · last: ${lastS} · next: ${nextS}`;
+}
+
+/** 当前项目的 open 任务，按创建时间/ id 排序（不做 limit 截断）。 */
+export function projectOpenTasks(tasks: Task[], options: DigestOptions): Task[] {
+  return tasks.filter(isOpen).filter((t) => sameProject(t.project, options.project)).sort(byCreatedThenId);
+}
+
+export function clampOpenShown(value: number): number {
+  return Math.min(Math.max(1, value), MAX_TASKS);
 }
 
 /**
@@ -62,8 +72,8 @@ export function buildDigest(tasks: Task[], options: DigestOptions): string {
     lines.push(`project ${options.project}: ${projectOpen} open`);
   }
 
-  const limit = Math.min(Math.max(1, options.maxOpenShown), MAX_TASKS);
-  const projectTasks = open.filter((t) => sameProject(t.project, options.project)).sort(byCreatedThenId);
+  const limit = clampOpenShown(options.maxOpenShown);
+  const projectTasks = projectOpenTasks(tasks, options);
   const shown = projectTasks.slice(0, limit);
   if (shown.length === 0) {
     lines.push(EMPTY_DIGEST_LINE);

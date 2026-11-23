@@ -33,6 +33,8 @@ test("KEEP_TOOLS is exactly the documented read-only set", () => {
     "router_task_list",
     "router_memory_append",
     "router_memory_read",
+    "router_note",
+    "router_task_get",
     "router_workers",
     "router_inspect",
   ];
