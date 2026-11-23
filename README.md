@@ -14,7 +14,8 @@
   - v2 只读与可见性：`router_inspect`（git-status / git-log / git-diff / tree）、
     `router_workers`（worker 的 runId / 状态 / session 路径）
 - 注入路由规则与「全局统计 + 当前项目明细」digest 到系统提示。
-- `/router` 命令查看账本状态、任务报告、digest 与 memory。
+- `/router` 命令：`status` / `tasks` / `task <id>` / `memory [query]` / `digest` /
+  **`new <目标>`**（自己开任务，等于把目标交给 Router 走完整流程）/ **`spawn <id>`**（手动派发一个 `queued` 任务）。
 - 账本 = 全局 `~/.pi/agent/router/tasks.json`（结构化事实）+ `~/.pi/agent/router/memory.md`
   （append-only 决策记录，块头带 `[project]` 标记）。
 

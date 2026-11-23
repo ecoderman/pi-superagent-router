@@ -592,7 +592,12 @@ export default function piRouter(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("router", {
-    description: "router: status | tasks | task <id> | memory [query] | digest",
+    description:
+      "router: status | tasks | task <id> | memory [query] | digest | new <goal> | spawn <id>",
+    getArgumentCompletions: (prefix) =>
+      ["status", "tasks", "task ", "memory", "digest", "new ", "spawn "]
+        .filter((value) => value.startsWith(prefix))
+        .map((value) => ({ value, label: value.trim() })),
     handler: async (args, ctx) => {
       const st = await ensureState(ctx);
       const { ledger, warning } = await loadLedger(st.home, { legacy: st.legacy });
@@ -619,8 +624,39 @@ export default function piRouter(pi: ExtensionAPI): void {
         const query = input === "memory" ? undefined : input.slice(7).trim();
         const text = await readMemory(st.home);
         ctx.ui.setWidget("router", memoryView(text, query, 8000).lines);
+      } else if (input.startsWith("new ")) {
+        // 手动开任务：不在扩展里派活，而是把指令交给模型，由它按 ROUTER_RULES 走
+        // router_task_open -> subagent -> router_task_update 的完整流程。
+        const goal = input.slice(4).trim();
+        if (goal === "") {
+          ctx.ui.notify("用法：/router new <目标描述>", "error");
+          return;
+        }
+        pi.sendUserMessage(
+          `用 Router 流程处理这个目标：${goal}\n` +
+            "先 router_task_open 建任务（key 自己取一个稳定的短标识），再派 router-worker，" +
+            "派发后不要手写 runId（扩展会自动记），最后 router_task_update 记账。",
+        );
+      } else if (input.startsWith("spawn ")) {
+        const id = input.slice(6).trim();
+        const task = ledger.tasks.find((t) => t.id === id);
+        if (!task) {
+          ctx.ui.notify(`router: 无任务 ${id}`, "error");
+          return;
+        }
+        if (task.status !== "queued" || task.runId !== undefined) {
+          ctx.ui.notify(`router: ${task.id} 状态为 ${task.status}，不能直接派发`, "error");
+          return;
+        }
+        pi.sendUserMessage(
+          `派发任务 ${task.id}（key=${task.key}，目标：${task.goal}，cwd：${task.cwd}）。` +
+            "用 subagent({ agent: \"router-worker\", task, cwd }) 派发，不要手写 runId 或状态，扩展会自动记。",
+        );
       } else {
-        ctx.ui.notify("router: 未知子命令，支持 status | tasks | task <id> | memory [query] | digest", "error");
+        ctx.ui.notify(
+          "router: 支持 status | tasks | task <id> | memory [query] | digest | new <目标> | spawn <id>",
+          "error",
+        );
         return;
       }
 
