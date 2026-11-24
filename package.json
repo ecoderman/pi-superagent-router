@@ -1,11 +1,11 @@
 {
   "name": "pi-router",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Minimal superagent (Router) extension for Pi — layered memory, read-only main session, and visible workers",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/store.test.ts test/guard.test.ts test/config.test.ts test/workers.test.ts test/memory.test.ts"
+    "test": "node --test test/store.test.ts test/guard.test.ts test/config.test.ts test/workers.test.ts test/memory.test.ts test/prompt.test.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

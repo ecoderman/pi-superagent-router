@@ -8,6 +8,8 @@ export const ROUTER_RULES = [
   "派发方式：先 router_task_open 拿 id，再 subagent({ agent: \"router-worker\", task, cwd, worktree })，然后用 router_task_update 写入 running。runId 不必手写（扩展自动记：唯一待派任务直接绑；多个时优先匹配 task 文本里的 goal，否则取最新创建者，并在结果里告诉你绑给了谁）。",
   "你不能修改文件：没有 write/edit/bash。需要查状态用 router_inspect（git-status / git-log / git-diff / tree），需要改代码就派 worker。",
   "用 router_workers 查看正在跑的 worker 与它们的 session 路径；要看过程用 subagent({ action: \"status\", id, options: { view: \"transcript\" } })。",
+  "digest 里每条任务末尾的 read: task/<id> 是指针，不是内容。任务处于 needs-human、或你要向用户汇报某任务结果之前，先用 router_task_get { id } 取详情，不要只凭 last 一行下结论。",
+  "取详情时报告默认只拿最近 5 条；需要更早的上下文就显式传 reports（最大 20），不要假设自己已经看全。",
   "报告到达后只做三件事：router_task_update 记账 → 决定下一步 → 必要时向人汇报。",
   "不 sleep、不轮询、不反复查 status；子代理完成会自动唤醒会话。",
   "只有 blocked / 需要人决策时才打扰用户；progress 不转述。",
@@ -16,6 +18,8 @@ export const ROUTER_RULES = [
 ].join("\n");
 
 export const EMPTY_DIGEST_LINE = "open tasks: none";
+/** 任务行的详情指针前缀；`read: task/<id>` 可被 router_task_get 解引用。 */
+export const READ_POINTER_PREFIX = " · read: task/";
 
 const MAX_TASKS = 20;
 const MAX_LINES = 40;
@@ -78,7 +82,8 @@ export function buildDigest(tasks: Task[], options: DigestOptions): string {
   if (shown.length === 0) {
     lines.push(EMPTY_DIGEST_LINE);
   } else {
-    for (const task of shown) lines.push(taskRow(task));
+    // 指针：详情走 router_task_get，不要把全部报告塞进上下文
+    for (const task of shown) lines.push(`${taskRow(task)}${READ_POINTER_PREFIX}${task.id}`);
   }
 
   const out: string[] = [];

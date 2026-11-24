@@ -4,7 +4,8 @@
 - `BRIEF-v2.md` — v2 需求（已交付，v0.2.0）
 - `BRIEF-v2.1.md` — v2.1 增量需求（runId 自动绑定改进，v0.2.1）
 - `BRIEF-v2.2.md` — v2.2 增量需求（`/router new`、`/router spawn`，v0.2.2）
-- `BRIEF-v3.md` — v3 需求（分层记忆 + 写权限收口，当前）
+- `BRIEF-v3.md` — v3 需求（分层记忆 + 写权限收口，v0.3.0）
+- `BRIEF-v3.2.md` — v3.2 增量（启用 read: task 指针，当前）
 - `PLAN.md` — v1 实施计划
 - `PLAN-v2.md` — v2 实施计划
 - `API-NOTES.md` — pi 扩展 API 速查
