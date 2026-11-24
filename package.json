@@ -1,6 +1,6 @@
 {
   "name": "pi-router",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Minimal superagent (Router) extension for Pi — layered memory, read-only main session, and visible workers",
   "type": "module",
   "scripts": {
@@ -12,12 +12,40 @@
     "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.5.2",
     "@types/node": "^24.0.0",
+    "typebox": "^1.4.7",
     "typescript": "^5.7.0"
   },
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
-  }
+    ],
+    "subagents": {
+      "agents": [
+        "./agents"
+      ]
+    }
+  },
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "agent",
+    "router",
+    "superagent",
+    "subagents",
+    "orchestration"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "src",
+    "agents",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ]
 }

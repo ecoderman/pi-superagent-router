@@ -1,0 +1,6 @@
+{
+  "scope": "global",
+  "routerReadOnly": true,
+  "maxOpenShown": 20,
+  "progressThrottleMs": 60000
+}
