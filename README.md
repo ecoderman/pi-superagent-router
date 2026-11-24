@@ -37,7 +37,7 @@ The Router **cannot modify files**: `write` / `edit` / `bash` are removed from i
 |---|---|
 | [pi](https://github.com/badlogic/pi-mono) `>= 1.5` | host runtime |
 | [pi-subagents](https://github.com/nicobailon/pi-subagents) | it provides the `subagent` tool and the worker runtime; **without it the Router can only keep records, not dispatch** |
-| Node.js `>= 20` | the extension is loaded as TypeScript directly |
+| Node.js `>= 20` | pi loads the extension as TypeScript itself; the **test suite** needs `>= 22.6` (native type stripping), and CI runs `tsc` on 20, the suite on 22/24 |
 
 ```bash
 pi install npm:pi-subagents
@@ -188,7 +188,7 @@ Router **不能改文件**：`write` / `edit` / `bash` 被移出工具集，它�
 |---|---|
 | [pi](https://github.com/badlogic/pi-mono) `>= 1.5` | 宿主运行时 |
 | [pi-subagents](https://github.com/nicobailon/pi-subagents) | 提供 `subagent` 工具与 worker 运行时；**没装它 Router 只能记账、无法派活** |
-| Node.js `>= 20` | 扩展以 TypeScript 形式直接加载 |
+| Node.js `>= 20` | 扩展由 pi 自己的 TypeScript 加载器加载；**测试套件**需要 `>= 22.6`（原生 type stripping），CI 在 20 上只跑 `tsc`，在 22/24 上跑测试 |
 
 ```bash
 pi install npm:pi-subagents

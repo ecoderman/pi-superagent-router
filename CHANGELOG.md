@@ -6,6 +6,9 @@
 
 ## 0.4.0 — first public release
 
+- CI runs the test suite on Node 22/24 (type stripping needs `>= 22.6`) and
+  `tsc --noEmit` on Node 20, where pi's own TypeScript loader runs the extension.
+
 - `package.json`: declare `pi.subagents.agents = ["./agents"]` so `router-worker`
   is discovered straight from the package (no manual copy).
 - Add `LICENSE` (MIT), `CHANGELOG.md`, `examples/`, and GitHub Actions CI
