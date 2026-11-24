@@ -50,10 +50,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/GITHUB_USER/pi-superagent-router.git"
+    "url": "git+https://github.com/ecoderman/pi-superagent-router.git"
   },
-  "homepage": "https://github.com/GITHUB_USER/pi-superagent-router#readme",
+  "homepage": "https://github.com/ecoderman/pi-superagent-router#readme",
   "bugs": {
-    "url": "https://github.com/GITHUB_USER/pi-superagent-router/issues"
+    "url": "https://github.com/ecoderman/pi-superagent-router/issues"
   }
 }

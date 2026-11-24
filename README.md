@@ -1,6 +1,6 @@
 # pi-router
 
-[![ci](https://github.com/GITHUB_USER/pi-superagent-router/actions/workflows/ci.yml/badge.svg)](https://github.com/GITHUB_USER/pi-superagent-router/actions/workflows/ci.yml)
+[![ci](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml/badge.svg)](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A minimal **superagent** for the [pi coding agent](https://github.com/badlogic/pi-mono): the main session becomes a read-only **Router** that dispatches self-contained tasks to `pi-subagents` workers, while a three-layer memory keeps track of what happened.
