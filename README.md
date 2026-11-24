@@ -1,8 +1,13 @@
 # pi-router
 
+[![ci](https://github.com/GITHUB_USER/pi-superagent-router/actions/workflows/ci.yml/badge.svg)](https://github.com/GITHUB_USER/pi-superagent-router/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A minimal **superagent** for the [pi coding agent](https://github.com/badlogic/pi-mono): the main session becomes a read-only **Router** that dispatches self-contained tasks to `pi-subagents` workers, while a three-layer memory keeps track of what happened.
 
-> Status: `0.4.0`, early but tested (71 unit tests, `tsc --noEmit` clean). Design specs and review records from its development live in the git history.
+> **0.4.0 — first public release.** Small, opinionated, still `0.x`: the API may change.
+> Built and reviewed over several internal milestones; their design specs and review
+> logs remain in the git history.
 
 ---
 
@@ -155,6 +160,9 @@ License: MIT.
 ---
 
 ## 中文
+
+> **0.4.0 —— 首个公开发布版本。** 小而克制，仍是 `0.x`，接口可能变动。
+> 之前经历了若干内部里程碑，其设计规格与审查记录保留在 git 历史里。
 
 ### 这是什么
 

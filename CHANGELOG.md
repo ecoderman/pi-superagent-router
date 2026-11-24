@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.4.0 — packaging release
+> **0.4.0 is the first public release.** Entries below it were internal
+> development milestones and were never published; they are kept here as a
+> record of how the design evolved.
+
+## 0.4.0 — first public release
 
 - `package.json`: declare `pi.subagents.agents = ["./agents"]` so `router-worker`
   is discovered straight from the package (no manual copy).
