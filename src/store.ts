@@ -598,63 +598,6 @@ export async function withLedger<T>(
   );
 }
 
-export function formatMemoryBlock(project: string, section: string, text: string, at?: string): string {
-  return `\n## ${at ?? new Date().toISOString()} [${project}] ${section}\n${text}\n`;
-}
-
-export async function appendMemoryUnlocked(
-  home: string,
-  project: string,
-  section: string,
-  text: string,
-): Promise<void> {
-  await mkdir(home, { recursive: true });
-  await appendFile(memoryPath(home), formatMemoryBlock(project, section, text), "utf8");
-}
-
-export async function appendMemoryLocked(
-  home: string,
-  project: string,
-  section: string,
-  text: string,
-  options?: LockOptions,
-): Promise<void> {
-  await withLock(home, () => appendMemoryUnlocked(home, project, section, text), options);
-}
-
-export async function readMemory(home: string): Promise<string> {
-  try {
-    return await readFile(memoryPath(home), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
-    throw error;
-  }
-}
-
-const MEMORY_HEADER = /^##\s+\S+\s+\[([^\]]+)\]/;
-
-/** 只保留 `[<project>]`（大小写不敏感）匹配的块；无标记的旧块不匹配。 */
-export function filterMemoryByProject(text: string, project: string): string {
-  if (text === "") return "";
-  const lines = text.split(/\r?\n/);
-  const kept: string[] = [];
-  let keeping = false;
-  for (const line of lines) {
-    const header = MEMORY_HEADER.exec(line);
-    if (header) {
-      keeping = sameProject(header[1], project);
-      if (keeping) kept.push(line);
-      continue;
-    }
-    if (line.startsWith("## ")) {
-      keeping = false;
-      continue;
-    }
-    if (keeping) kept.push(line);
-  }
-  return kept.join("\n");
-}
-
 export function isOpen(task: Task): boolean {
   return !(TERMINAL as readonly string[]).includes(task.status);
 }
@@ -1007,6 +950,28 @@ export async function appendProjectMemoryLocked(
   );
 }
 
+/** 迁移落盘：已含迁移标记则跳过（幂等），否则整份内容 temp+rename 原子替换。 */
+const MIGRATION_MARKER = "<!-- migrated from memory.md at";
+
+async function mergeMemoryFile(target: string, addition: string): Promise<void> {
+  let existing = "";
+  try {
+    existing = await readFile(target, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (existing.includes(MIGRATION_MARKER)) return;
+  const trimmed = existing.replace(/[\s]+$/, "");
+  const next = trimmed === "" ? addition : trimmed + "\n\n" + addition;
+  const tmp = target + "." + process.pid + "." + Math.random().toString(36).slice(2) + ".tmp";
+  try {
+    await writeFile(tmp, next, "utf8");
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+}
+
 export interface MigrateMemoryResult {
   warning?: string;
 }
@@ -1048,13 +1013,15 @@ export async function migrateMemory(home: string, options?: LockOptions): Promis
         const iso = new Date().toISOString();
         const marker = `<!-- migrated from memory.md at ${iso} -->`;
 
+        // 每个目标先读现有内容、拼好整份新文本、再 temp+rename 原子替换：
+        // 中途失败只会留下“某个文件是旧版”，不会出现半截追加；原 memory.md 未改名，可安全重跑。
         if (global.length > 0) {
           await mkdir(home, { recursive: true });
-          await appendFile(globalMemoryPath(home), `${global.join("\n\n")}\n\n${marker}\n`, "utf8");
+          await mergeMemoryFile(globalMemoryPath(home), `${global.join("\n\n")}\n\n${marker}\n`);
         }
         for (const [project, blocks] of Object.entries(projects)) {
           await mkdir(projectsDir(home), { recursive: true });
-          await appendFile(projectMemoryPath(home, project), `${blocks.join("\n\n")}\n\n${marker}\n`, "utf8");
+          await mergeMemoryFile(projectMemoryPath(home, project), `${blocks.join("\n\n")}\n\n${marker}\n`);
         }
 
         await rename(legacy, `${legacy}.migrated-${Date.now()}`);

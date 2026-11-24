@@ -29,7 +29,7 @@ import {
 import {
   assembleMemory,
   clampReports,
-  formatAuditLine,
+  formatAuditView,
   formatSessionText,
   latestReports,
   makeAuditLine,
@@ -264,7 +264,7 @@ async function scopedMemoryText(
 ): Promise<string> {
   if (scope === "audit") {
     const lines = await readAudit(st.home, { limit: auditLimit });
-    return lines.length === 0 ? "" : lines.map(formatAuditLine).join("\n");
+    return formatAuditView(lines);
   }
   if (scope === "global") return readGlobalMemory(st.home);
   if (scope === "project") return readProjectMemory(st.home, st.project);

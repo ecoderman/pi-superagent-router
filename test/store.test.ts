@@ -4,14 +4,15 @@ import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
-  appendMemoryLocked,
-  appendMemoryUnlocked,
+  appendGlobalMemoryLocked,
+  appendProjectMemoryLocked,
   applyOpen,
   applyUpdate,
   clip,
   countBy,
   emptyLedger,
-  filterMemoryByProject,
+  readGlobalMemory,
+  readProjectMemory,
   findOpen,
   formatTaskRow,
   importLegacyTasks,
@@ -23,7 +24,6 @@ import {
   parseLedger,
   projectName,
   sameProject,
-  readMemory,
   saveLedger,
   bindRunId,
   tasksPath,
@@ -285,26 +285,29 @@ test("corrupted ledger is backed up by the locked write path, not by the read pa
   }
 });
 
-test("unknown id throws; memory is global with project tags and project filtering", async () => {
+test("unknown id throws; global and project memory stay in separate files", async () => {
   const home = await newHome();
   try {
     assert.throws(() => applyUpdate(emptyLedger(), "t999", {}), /no task t999/);
 
-    assert.equal(await readMemory(home), "");
-    await appendMemoryLocked(home, "alpha", "decision", "why split this way");
-    await appendMemoryUnlocked(home, "beta", "change", "switched approach");
-    const text = await readMemory(home);
-    assert.ok(text.includes("## "));
-    assert.ok(text.includes("[alpha] decision"));
-    assert.ok(text.includes("[beta] change"));
+    assert.equal(await readGlobalMemory(home), "");
+    assert.equal(await readProjectMemory(home, "alpha"), "");
 
-    const direct = await readFile(memoryPath(home), "utf8");
-    assert.equal(direct, text);
+    await appendGlobalMemoryLocked(home, "回答用中文");
+    await appendProjectMemoryLocked(home, "alpha", "why split this way");
 
-    const alphaOnly = filterMemoryByProject(text, "ALPHA");
-    assert.ok(alphaOnly.includes("why split this way"));
-    assert.ok(!alphaOnly.includes("switched approach"));
-    assert.equal(filterMemoryByProject(text, "missing"), "");
+    const global = await readGlobalMemory(home);
+    assert.ok(global.includes("回答用中文"));
+    assert.ok(!global.includes("why split this way"));
+
+    const project = await readProjectMemory(home, "alpha");
+    assert.ok(project.includes("why split this way"));
+    assert.ok(!project.includes("回答用中文"));
+
+    assert.equal(await readProjectMemory(home, "missing"), "");
+
+    // 项目名带路径分隔符必须 fail-closed，不能写到 home 之外
+    await assert.rejects(() => appendProjectMemoryLocked(home, "../evil", "x"), /memory scope/);
   } finally {
     await cleanup(home);
   }

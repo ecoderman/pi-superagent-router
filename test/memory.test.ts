@@ -9,6 +9,7 @@ import {
   clampReports,
   emptySession,
   formatAuditLine,
+  formatAuditView,
   latestReports,
   makeAuditLine,
   parseAuditLine,
@@ -18,6 +19,7 @@ import {
   truncateText,
   validateMemoryTarget,
 } from "../src/memory.ts";
+import type { AuditLine } from "../src/memory.ts";
 import {
   appendAudit,
   appendGlobalMemoryLocked,
@@ -468,5 +470,61 @@ test("migrateMemory rejects escaped [project] tags and keeps the legacy file", a
     await assert.rejects(readFile(join(home, "projects", "..", "..", "evil.md"), "utf8"));
   } finally {
     await cleanup(home);
+  }
+});
+
+test("formatAuditView numbers lines newest-first to match /router promote <n>", () => {
+  const line = (at: string, text: string): AuditLine => ({
+    at,
+    session: "s",
+    project: "alpha",
+    kind: "note",
+    text,
+  });
+  assert.equal(formatAuditView([]), "");
+
+  const view = formatAuditView([
+    line("2026-01-01T00:00:00.000Z", "oldest"),
+    line("2026-01-02T00:00:00.000Z", "middle"),
+    line("2026-01-03T00:00:00.000Z", "newest"),
+  ]);
+  const rows = view.split("\n");
+  assert.equal(rows.length, 3);
+  assert.ok(rows[2].startsWith("[1] "), rows[2]);
+  assert.ok(rows[2].includes("newest"));
+  assert.ok(rows[1].startsWith("[2] "), rows[1]);
+  assert.ok(rows[0].startsWith("[3] "), rows[0]);
+  assert.ok(rows[0].includes("oldest"));
+});
+
+test("migration is atomic per target and idempotent across a re-run", async () => {
+  const home = await mkdtemp(join(tmpdir(), "pi-router-migrate-"));
+  try {
+    const legacy = join(home, "memory.md");
+    await writeFile(
+      legacy,
+      "\n## 2026-11-20T01:00:00.000Z [alpha] 拆解\nalpha 串行推进。\n\n## 2026-11-20T02:00:00.000Z 全局偏好\n回答用中文。\n",
+      "utf8",
+    );
+
+    const first = await migrateMemory(home);
+    assert.equal(first.warning, undefined);
+
+    const globalOnce = await readFile(join(home, "global.md"), "utf8");
+    const projectOnce = await readFile(join(home, "projects", "alpha.md"), "utf8");
+    assert.ok(globalOnce.includes("回答用中文"));
+    assert.ok(projectOnce.includes("alpha 串行推进"));
+    // 原文件已改名，重跑是空操作
+    assert.equal(await migrateMemory(home).then((r) => r.warning), undefined);
+    assert.equal(await readFile(join(home, "global.md"), "utf8"), globalOnce);
+    assert.equal(await readFile(join(home, "projects", "alpha.md"), "utf8"), projectOnce);
+
+    // 只剩迁移标记一次，没有重复追加
+    assert.equal(globalOnce.split("<!-- migrated from memory.md at").length, 2);
+    // 目标目录没有残留 temp 文件
+    const leftover = (await readdir(home)).filter((name) => name.endsWith(".tmp"));
+    assert.deepEqual(leftover, []);
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });

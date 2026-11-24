@@ -456,3 +456,12 @@ export function latestReports(reports: readonly Report[], count: number): Report
   if (count <= 0) return [];
   return reports.slice(-count);
 }
+
+/**
+ * 审计视图：给每行加 `[n]` 前缀，n 与 `/router promote <n>` 一致（1 = 最新一行）。
+ * 便于用户直接把编号抄进 promote，不用人工数行。
+ */
+export function formatAuditView(lines: readonly AuditLine[]): string {
+  if (lines.length === 0) return "";
+  return lines.map((line, index) => `[${lines.length - index}] ${formatAuditLine(line)}`).join("\n");
+}

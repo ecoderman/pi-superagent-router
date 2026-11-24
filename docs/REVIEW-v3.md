@@ -12,11 +12,17 @@
 | fix（supervisor 直接修） | PASS | lockfile 顶层与 `packages[""]` 版本同步为 0.3.0 |
 | review-v3-final | 超时（30min） | 未产出结论；不阻塞——第 3 轮仅剩的 P1 已修复并由 supervisor 复核 |
 
-## 3 条 report-only P2（未修，记录在案）
+## 3 条 P2 已在 v0.3.1 修完
 
-- `store.ts` 中 v2 遗留的 memory helpers 已无人调用（死代码）。
-- `migrateMemory` 非事务性：中途失败可能留下部分已写文件（原 `memory.md` 始终保留，可回滚）。
-- `/router memory audit` 不显示行号，`promote <行号>` 需人工数行。
+- **死代码**：删除 `store.ts` 的 v2 遗留 `formatMemoryBlock` / `appendMemoryUnlocked` /
+  `appendMemoryLocked` / `readMemory` / `filterMemoryByProject`；对应测试改用 v3 的
+  `appendGlobalMemoryLocked` / `appendProjectMemoryLocked` / `readGlobalMemory` / `readProjectMemory`，
+  并补了 `../evil` 越权 fail-closed 断言。
+- **迁移事务性**：每个目标改为「读现有内容 → 拼整份新文本 → temp+rename 原子替换」，
+  已含迁移标记则跳过；中途失败只会留下某个文件的旧版本，原 `memory.md` 未改名，可安全重跑。
+  新增用例断言重跑幂等、标记只出现一次、无 temp 残留。
+- **审计行号**：新增 `formatAuditView()`，每行前缀 `[n]`，`1 = 最新`，与 `/router promote <n>` 语义一致，
+  用户可直接把编号抄进命令；新增单测。
 
 ## Supervisor 复核（实跑）
 
