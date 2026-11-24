@@ -34,7 +34,7 @@ import { buildDigest, EMPTY_DIGEST_LINE } from "../src/prompt.ts";
 import type { Ledger, Task } from "../src/types.ts";
 
 async function newHome(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "pi-router-home-"));
+  return mkdtemp(join(tmpdir(), "pi-superagent-router-home-"));
 }
 
 async function cleanup(dir: string): Promise<void> {

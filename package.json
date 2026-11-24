@@ -1,7 +1,7 @@
 {
-  "name": "pi-router",
+  "name": "pi-superagent-router",
   "version": "0.4.0",
-  "description": "Minimal superagent (Router) extension for Pi — layered memory, read-only main session, and visible workers",
+  "description": "A minimal super-agent extension for pi — read-only Router, visible workers, layered memory",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

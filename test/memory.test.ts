@@ -38,7 +38,7 @@ import {
 } from "../src/store.ts";
 
 async function newHome(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "pi-router-memory-"));
+  return mkdtemp(join(tmpdir(), "pi-superagent-router-memory-"));
 }
 
 async function cleanup(dir: string): Promise<void> {
@@ -498,7 +498,7 @@ test("formatAuditView numbers lines newest-first to match /router promote <n>", 
 });
 
 test("migration is atomic per target and idempotent across a re-run", async () => {
-  const home = await mkdtemp(join(tmpdir(), "pi-router-migrate-"));
+  const home = await mkdtemp(join(tmpdir(), "pi-superagent-router-migrate-"));
   try {
     const legacy = join(home, "memory.md");
     await writeFile(

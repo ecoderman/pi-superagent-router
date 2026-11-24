@@ -14,7 +14,7 @@ import {
 import { clampLimit, formatTree, inspectArgv, INSPECT_COMMANDS, treeEntries } from "../src/inspect.ts";
 
 async function newDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "pi-router-guard-"));
+  return mkdtemp(join(tmpdir(), "pi-superagent-router-guard-"));
 }
 
 async function cleanup(dir: string): Promise<void> {

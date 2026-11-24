@@ -1,308 +1,393 @@
-# pi-router
+# pi-superagent-router
 
-[![ci](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml/badge.svg)](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![ci](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml/badge.svg)
+![license](https://img.shields.io/badge/license-MIT-blue.svg)
 
-A minimal **superagent** for the [pi coding agent](https://github.com/badlogic/pi-mono): the main session becomes a read-only **Router** that dispatches self-contained tasks to `pi-subagents` workers, while a three-layer memory keeps track of what happened.
+**A minimal super-agent extension for the [pi coding agent](https://github.com/badlogic/pi-mono).**
+The session you talk to stops writing code: it decides what to do, hands the work to workers, and keeps the ledger.
 
-> **0.4.0 — first public release.** Small, opinionated, still `0.x`: the API may change.
-> Built and reviewed over several internal milestones; their design specs and review
-> logs remain in the git history.
+> **0.4.0 · first public release.** ~1k lines, no runtime dependencies, no daemon, no database.
 
----
+## The problem
 
-## English
+Two ceilings are unavoidable. A session goes blunt as its context fills, and human attention only covers three to five live sessions at once.
 
-### What it is
+More instructions do not fix either. The orchestrator's context is the bottleneck, and every added instruction competes with the task itself.
 
-pi-router turns the session you are talking to into a dispatcher, not an implementer:
+So the fix is not a longer prompt but a split: a read-only Router that judges and keeps books, and workers that do the work. Worth it for long-running work you return to and must explain later; for a one-off edit, a plain `pi` session is cheaper.
+
+## Architecture
+
+### Where it comes from
+
+Borrowed from DeepSeek's [`dsh-superagent-prototype`](https://github.com/deepseek-ai/dsh-superagent-prototype) and its design essay. Its judgement: **how good one task gets depends on the model; how many tasks advance depends on human attention.** So it does not make one session smarter — it moves conversation, task state, authority and execution into separate places.
+
+| DeepSeek's concept | Here |
+| --- | --- |
+| Router / Worker split | the session you talk to loses `write` / `edit` / `bash`; workers get their own sessions |
+| Ticket | `router_task_*`: idempotent by key, report + reason code + runId, detail on demand |
+| Mandate | writes scoped: `session` / `audit` for the model, `project` / `global` only by a human command |
+| Summary-only handoff | only a compacted report crosses; detail sits behind `read: task/t3` |
+| State on disk | one ledger file; one summary restores the scene |
+| Source / Trigger | **not ported** |
+| Concurrency, worktrees | **delegated to [`pi-subagents`](https://github.com/nicobailon/pi-subagents)** |
+
+### How it ships
+
+A **pi extension**: no event intake, no rebuilt concurrency layer, no second CLI to wire in. Install is two commands and it works immediately — almost zero configuration.
+
+### Project layout
 
 ```
-you ──► Router (this session, read-only)
-          │  decides what to delegate, writes the brief
-          ▼
-        subagent({ agent: "router-worker", ... })     ← pi-subagents runs it
-          │
-          ▼
-        worker (its own session: write/edit/bash, may spawn nested subagents)
-          │
-          └──► final report ──► Router records it in the ledger
+src/
+  index.ts     tools, commands, events, read-only enforcement
+  store.ts     ledger, file lock, migration
+  memory.ts    three scopes + assembleMemory
+  prompt.ts    router rules + digest
+  guard.ts     keep-list and call blocking
+  inspect.ts   fixed-argv repository inspection
+  workers.ts   run-directory discovery and status
+  config.ts    router.json parsing
+  types.ts
+agents/router-worker.md    the worker definition (may spawn nested subagents)
+test/                      six files, 71 cases
+examples/router.json
+.github/workflows/ci.yml
 ```
 
-The Router **cannot modify files**: `write` / `edit` / `bash` are removed from its tool set, so it can only read, inspect, dispatch, and keep records. Workers keep full capabilities.
+### Agent hierarchy
 
-### Requirements
+```
+you
+└── Router  (main session)      read · inspect · dispatch · record     no write / edit / bash
+    └── worker  (own session)   read · write · edit · bash · subagent
+        └── nested worker       same capabilities
+```
+
+- A worker never sees the Router's conversation; the Router never sees a worker's transcript, only its final report.
+- The Router's ledger is trustworthy because the session keeping the books cannot touch what it reports on.
+
+### Design principles
+
+1. **The orchestrator is read-only** — otherwise you can never say who made a change.
+2. **Only summaries cross the boundary** — detail is a pointer, not a payload.
+3. **Context stays bounded** — 4096 characters / 60 lines per turn, plus a `budget:` line saying what was cut.
+4. **Write permissions are scoped** — enforced by the extension, not by the prompt.
+5. **Nothing waits** — dispatch returns, reports arrive as messages, no polling.
+
+Principles 1, 2 and 4 come from DeepSeek's Router and Mandate design; 3 applies the same reasoning to the window itself; 5 exists because pi has no event loop to park a dispatch in.
+
+### Memory layers
+
+| Layer | File | Writer | Lifetime |
+| --- | --- | --- | --- |
+| `global` | `global.md` | **human** (`/router promote`) | permanent, cross-project |
+| `project` | `projects/<project>.md` | **human** (`/router promote`) | permanent, per project |
+| `session` | `sessions/<id>.json` | model (`router_note`) | pruned after 7 days |
+| audit | `audit.jsonl` | extension | append-only, numbered for promotion |
+
+`router_memory_append` writes only to the audit log and tells the model to ask a human; `/router promote 2 project` is the one path from a decision to durable memory. That is Mandate in miniature: an agent may record what it decided, but cannot grant itself the right to decide for you next time.
+
+### What a dispatch looks like
+
+```
+you     /router new add a CONTRIBUTING.md and link it from the README
+Router  t1 opened · dispatched · boundary: CONTRIBUTING.md + README.md
+        acceptance: link resolves, nothing else touched
+  ...
+Router  t1 done · 2 files · run 4c1e · detail: read: task/t1
+```
+
+Wrong result? `/router task t1` shows the report and reason code; `/router memory audit` shows the decisions made at the time. No reconstructing intent from a diff.
+
+## Quick start
+
+```bash
+pi install npm:pi-subagents
+pi install git:github.com/ecoderman/pi-superagent-router
+```
+
+```bash
+cd your-project && pi
+```
+
+Everyday use is plain language. Slash commands are just shortcuts for it:
+
+```
+> tidy up the locking in src/store.ts, fix any path that forgets to release, keep the tests green
+Router  t1 opened · dispatched · boundary: src/store.ts
+        acceptance: every lock released, existing tests green
+  ...
+Router  t1 done · 1 file · run 4c1e · detail: read: task/t1
+```
+
+```
+/router new add a CONTRIBUTING.md and link it from the README   # same thing, as a command
+/router status                                                   # one line per open task
+/router task t1                                                  # what it did, and why
+```
+
+> **Read-only mode comes first.** Every session that loads this extension becomes a read-only Router, including the one you code in. Disable with `{"routerReadOnly": false}` in `~/.pi/agent/router.json`, or use `pi -ne`.
+
+## Requirements
 
 | Requirement | Why |
-|---|---|
+| --- | --- |
 | [pi](https://github.com/badlogic/pi-mono) `>= 1.5` | host runtime |
-| [pi-subagents](https://github.com/nicobailon/pi-subagents) | it provides the `subagent` tool and the worker runtime; **without it the Router can only keep records, not dispatch** |
-| Node.js `>= 20` | pi loads the extension as TypeScript itself; the **test suite** needs `>= 22.6` (native type stripping), and CI runs `tsc` on 20, the suite on 22/24 |
+| [pi-subagents](https://github.com/nicobailon/pi-subagents) | the `subagent` tool and worker runtime; without it the Router can only keep books |
+| Node.js `>= 20` | pi loads the extension as TypeScript; the test suite needs `>= 22.6` |
 
-```bash
-pi install npm:pi-subagents
-pi install git:github.com/<you>/pi-superagent-router   # private: SSH or `gh auth` required
-```
+`router-worker` ships in the package (`"pi": { "subagents": { "agents": ["./agents"] } }`), no manual copy.
 
-The `router-worker` agent ships inside the package and is picked up automatically through
-`package.json` → `"pi": { "subagents": { "agents": ["./agents"] } }`. No manual copy needed.
+## Tools
 
-Verify the install:
+| Tool | Purpose |
+| --- | --- |
+| `router_task_open` / `_update` / `_list` / `_get` | ledger: idempotent by key, reason codes, detail on demand |
+| `router_note` | session memory: focus + short notes |
+| `router_memory_append` | audit only, cannot touch shared memory |
+| `router_memory_read` | read `global` / `project` / `session` / `audit` |
+| `router_workers` | runId, state, session path, last report |
+| `router_inspect` | `git-status` / `git-log` / `git-diff` / `tree`, fixed argv |
 
-```
-pi -p "list your router_* tools; is write available? is agent router-worker listed?"
-```
+Dispatching uses pi-subagents' own `subagent` tool — not wrapped, not reimplemented.
 
-Expect the nine `router_*` tools, no `write`, and `router-worker` in the agent list.
+## Commands
 
-### Quick start
+| Command | What it does |
+| --- | --- |
+| `/router status` | one line per open task, plus open / running / needs-human counts |
+| `/router tasks` | alias of `status` |
+| `/router task <id>` | full report timeline for one task |
+| `/router digest` | the exact block injected into the prompt this turn — what the model actually sees |
+| `/router memory [scope] [query]` | read `global` / `project` / `session` / `audit`; `query` filters lines |
+| `/router session` | this session's focus and recent notes |
+| `/router new <goal>` | open a task and dispatch it (the command form of saying the goal) |
+| `/router spawn <id>` | dispatch a queued task that was opened but never sent |
+| `/router promote <n> [global\|project]` | copy audit line `n` (1 = newest) into global or project memory |
 
-```bash
-cd your-project
-pi
-```
+## Configuration
 
-```
-/router new add a CONTRIBUTING.md and link it from the README
-/router status
-/router task t1
-```
-
-Or just describe the goal — the Router follows the same flow.
-
-### Three-layer memory
-
-Memory is split by **scope**, not by folder. All writes flow through the extension, never through model-facing tools.
-
-| Layer | File | Who writes | Lifetime |
-|---|---|---|---|
-| `global` | `<home>/global.md` | **humans only** (`/router promote`) | permanent, shared across projects |
-| `project` | `<home>/projects/<project>.md` | **humans only** (`/router promote`) | permanent per project |
-| `session` | `<home>/sessions/<sessionId>.json` | the model (`router_note`) | pruned after 7 days |
-| audit | `<home>/audit.jsonl` | the extension | append-only |
-
-- `<home>` defaults to `~/.pi/agent/router/`. One shared home is fine: every task carries a `project` field, and `projects/<project>.md` is one file per project. Set `"scope": "project"` in the config to give each repo its own `.pi/router/` instead (this also makes `global.md` per-repo).
-- Each turn, `assembleMemory()` injects a bounded view: `## global` → `## project` → `## session` → `## open tasks`, with per-layer budgets, a hard cap of 4096 characters / 60 lines, and a `budget:` manifest line so the model knows what was truncated.
-- Task rows end with a pointer, `· read: task/t3`; the model dereferences it with `router_task_get { id }` before reporting or when a task is `needs-human`.
-- The model **cannot** append to `global` / `project`. `router_memory_append` writes an audit line and tells the model to ask a human for promotion. `/router promote <n> [global|project]` copies audit line `n` (newest = 1) into the chosen layer.
-
-### Tools
-
-| Tool | Parameters | Purpose |
-|---|---|---|
-| `router_task_open` | `{ key, goal, cwd?, worktree?, model? }` | idempotent by `key`; returns a task id |
-| `router_task_update` | `{ id, status?, runId?, report?, deliverables?, next?, reason? }` | record state, append a report, tag a reason code |
-| `router_task_list` | `{ status? }` | compact table; `open` filters unfinished work |
-| `router_task_get` | `{ id, reports? }` | full task + latest N reports (0–20); the pointer target |
-| `router_memory_read` | `{ scope?, query?, maxChars? }` | read `global` / `project` / `session` / `audit`, or all three layers |
-| `router_memory_append` | `{ section, text }` | **audit only**; never writes shared memory |
-| `router_note` | `{ text, focus? }` | session memory (focus + notes, FIFO 50) |
-| `router_workers` | `{ status?: "active" \| "done" \| "all" }` | run id, state, session path, last report per worker |
-| `router_inspect` | `{ cmd: "git-status" \| "git-log" \| "git-diff" \| "tree", limit? }` | the only shell-like access; fixed argv, no free-form input |
-
-`subagent` is pi-subagents' tool, used directly — pi-router does not wrap or reimplement it.
-
-### Commands
-
-```
-/router status | tasks | task <id> | digest
-/router memory [scope] [query]     scope: global | project | session | audit
-/router session
-/router new <goal>                 start a task and dispatch it
-/router spawn <id>                 dispatch a queued task
-/router promote <n> [global|project]
-```
-
-### Read-only mode
-
-By default **every** session that loads the extension becomes a read-only Router, including the one you use for coding. Escape hatches:
-
-```json
-// ~/.pi/agent/router.json  (or <cwd>/.pi/router.json, or $PI_ROUTER_HOME)
-{ "routerReadOnly": false }
-```
-
-or start a plain session with `pi -ne` (no extensions).
-
-Configuration reference:
+`~/.pi/agent/router.json`, all optional:
 
 | Field | Default | Meaning |
-|---|---|---|
-| `scope` | `"global"` | `global` = one shared home; `project` = `<cwd>/.pi/router` |
-| `home` | `~/.pi/agent/router` | storage root; ignored when `scope` is `project` |
-| `routerReadOnly` | `true` | remove `write`/`edit`/`bash` and block them |
-| `workerModel` | `null` | shown in the prompt as a hint; pi-router does not launch workers |
+| --- | --- | --- |
+| `scope` | `"global"` | one shared home, or `project` for `<cwd>/.pi/router` |
+| `home` | `~/.pi/agent/router` | storage root (`PI_ROUTER_HOME` overrides) |
+| `routerReadOnly` | `true` | remove and block `write` / `edit` / `bash` |
+| `workerModel` | `null` | hint only; this extension never dispatches workers |
 | `maxOpenShown` | `20` | task rows shown in the digest |
-| `progressThrottleMs` | `60000` | reserved for worker progress relays |
 
-`PI_ROUTER_HOME` overrides the storage root entirely.
+## Limitations
 
-### Safety and limitations
+- **Not a sandbox.** Workers run with your permissions, no approval prompt. Use `worktree: true` when several touch one repo.
+- **Not an autonomous coder.** It dispatches the goals you give it; it does not plan your project.
+- **Not a workflow engine.** Parallelism, retries, worktrees and missions are pi-subagents' job.
+- **Not event-driven.** DeepSeek's system listens to GitHub, Feishu and CI; this one listens to you.
+- **Not stable.** `0.x`: the tool surface may change between minor versions.
 
-- Workers run **without approval prompts** as your OS user. pi-router only removes tools from the Router; it is not a sandbox. Use `worktree: true` when parallel workers touch the same repo.
-- A worker's transcript never enters the Router's context — only its final message (and reports you record). Inspect details with `subagent({ action: "status", id, options: { view: "transcript" } })` or `router_workers`.
-- `runId` is bound automatically: a single queued task is bound directly; with several, the dispatch text is matched against task goals, falling back to the newest task, and the binding is reported in the tool result. Override with `router_task_update { id, runId }`.
-- Workers can only be resumed from the session that launched them (`pi-subagents` limitation).
-- Migration from 0.2.x: a legacy `memory.md` is split into `global.md` + `projects/<p>.md` once and renamed `.migrated-<ts>`; idempotent, and the original is kept when parsing fails.
+## Tests
 
-### Development
+71 unit tests, `tsc --noEmit` clean. CI: suite on Node 22/24, typecheck on Node 20. Verified with `pi install` in a clean project: nine `router_*` tools, no `write`, `router-worker` discovered, one real dispatch produced a file with an auto-bound runId.
 
-```bash
-npm install
-npm run typecheck   # tsc --noEmit
-npm test            # node:test, 71 cases
-```
+## Credits
 
-Layout: `src/` (extension), `agents/` (worker definition), `test/`, `examples/`. Design specifications, plans, reviews and fix logs from every release are in the git history (`git log --oneline`, `git show <tag>:docs/BRIEF-v3.md`).
-
-License: MIT.
+Architecture, philosophy and vocabulary: DeepSeek's [`dsh-superagent-prototype`](https://github.com/deepseek-ai/dsh-superagent-prototype) (MIT). Execution, concurrency and worktree isolation: [`pi-subagents`](https://github.com/nicobailon/pi-subagents). This is an independent, unofficial minimal implementation, unaffiliated with either project. MIT licensed.
 
 ---
 
-## 中文
+# pi-superagent-router（中文）
 
-> **0.4.0 —— 首个公开发布版本。** 小而克制，仍是 `0.x`，接口可能变动。
-> 之前经历了若干内部里程碑，其设计规格与审查记录保留在 git 历史里。
+![ci](https://github.com/ecoderman/pi-superagent-router/actions/workflows/ci.yml/badge.svg)
+![license](https://img.shields.io/badge/license-MIT-blue.svg)
 
-### 这是什么
+**给 [pi coding agent](https://github.com/badlogic/pi-mono) 写的一个极简 super-agent 扩展。**
+你对话的会话不再写代码：它决定做什么、把活派出去、把过程记下来。
 
-pi-router 把你正在对话的会话变成一个**调度者**，而不是执行者：
+> **0.4.0 · 首个公开版本。** 约 1k 行，无运行时依赖，无守护进程，无数据库。
+
+## 问题背景
+
+编码会话有两个绕不过去的上限：会话本身会随上下文膨胀而变钝，人的注意力也只够同时照看三到五个会话。
+
+靠"多交代几句"解决不了，因为编排者的上下文就是瓶颈，每多一条指令就多一分干扰。
+
+所以真正要做的是把「决定」和「执行」拆开：一个只读的 Router 负责判断和记账，worker 负责动手。值得用在需要反复回来、事后要能解释清楚的长活上；临时改一处小地方，普通 `pi` 会话更省事。
+
+## 架构设计
+
+### 设计来源
+
+借鉴 DeepSeek 的 [`dsh-superagent-prototype`](https://github.com/deepseek-ai/dsh-superagent-prototype) 及其设计文章。核心判断是：**单个任务做得多好取决于模型；能同时推进多少任务取决于人的注意力。** 所以它不去把单个会话做聪明，而是把对话、任务状态、权限和执行挪到各自该在的位置。
+
+| DeepSeek 的概念 | 在这里对应什么 |
+| --- | --- |
+| Router / Worker 两层分工 | 你对话的会话失去 `write` / `edit` / `bash`；worker 有自己的会话 |
+| 工单（Ticket） | `router_task_*`：按 key 幂等，带报告、reason 码、runId，要细节时再取 |
+| 授权范围（Mandate） | 写入分域：`session` / `audit` 给模型，`project` / `global` 只能由人下令写 |
+| 只交接摘要 | 只有压缩报告跨过去，细节留在 `read: task/t3` 后面 |
+| 状态落盘 | 账本就是磁盘上一个文件，一份摘要恢复现场 |
+| 事件源（Source / Trigger） | **本期没有移植** |
+| 并发、worktree | **交给 [`pi-subagents`](https://github.com/nicobailon/pi-subagents)** |
+
+### 实现形式
+
+做成一个 **pi 扩展**：不做事件接入，不重写并发层，不要求再装一个 CLI 当 worker。安装两条命令，装完即用——几乎零配置。
+
+### 项目结构
 
 ```
-你 ──► Router（当前会话，只读）
-         │  判断该派什么活、写任务说明书
-         ▼
-       subagent({ agent: "router-worker", ... })     ← 由 pi-subagents 实际执行
-         │
-         ▼
-       worker（独立会话：write/edit/bash，可再开子代理）
-         │
-         └──► 最终报告 ──► Router 记账
+src/
+  index.ts     工具、命令、事件、只读拦截
+  store.ts     账本、文件锁、迁移
+  memory.ts    三层记忆与 assembleMemory
+  prompt.ts    路由规则与 digest
+  guard.ts     白名单与调用拦截
+  inspect.ts   固定 argv 的仓库检查
+  workers.ts   运行目录发现与状态
+  config.ts    router.json 解析
+  types.ts
+agents/router-worker.md    worker 定义（可再开子代理）
+test/                      六个文件，71 个用例
+examples/router.json
+.github/workflows/ci.yml
 ```
 
-Router **不能改文件**：`write` / `edit` / `bash` 被移出工具集，它只能读、查状态、派活、记账。worker 保持完整能力。
+### Agent 层级
 
-### 依赖
+```
+你
+└── Router（主会话）      读 · 查 · 派活 · 记账          没有 write / edit / bash
+    └── worker（独立会话） read · write · edit · bash · subagent
+        └── 嵌套 worker    能力同上
+```
 
-| 依赖 | 原因 |
-|---|---|
-| [pi](https://github.com/badlogic/pi-mono) `>= 1.5` | 宿主运行时 |
-| [pi-subagents](https://github.com/nicobailon/pi-subagents) | 提供 `subagent` 工具与 worker 运行时；**没装它 Router 只能记账、无法派活** |
-| Node.js `>= 20` | 扩展由 pi 自己的 TypeScript 加载器加载；**测试套件**需要 `>= 22.6`（原生 type stripping），CI 在 20 上只跑 `tsc`，在 22/24 上跑测试 |
+- worker 看不到 Router 的对话；Router 也看不到 worker 的完整过程，只收到最终报告。
+- 账本之所以可信，是因为记账的那个会话，没有能力去动它所报告的东西。
+
+### 设计原则
+
+1. **编排者只读**——它要是还能改文件，你就永远说不清一个改动是谁做的。
+2. **只有摘要能跨边界**——细节是指针，不是正文。
+3. **上下文始终有界**——每轮 4096 字符 / 60 行，末尾一行 `budget:` 说明剪了什么。
+4. **写权限按作用域分开**——由扩展强制，提示词改不了。
+5. **不做等待**——派发即返回，报告以消息到达，没有轮询。
+
+第 1、2、4 条来自 DeepSeek 的 Router 与 Mandate；第 3 条把同样的道理用回窗口本身；第 5 条是因为 pi 没有事件循环，派发没地方挂着等。
+
+### 记忆分层
+
+| 层 | 文件 | 谁能写 | 生命周期 |
+| --- | --- | --- | --- |
+| `global` | `global.md` | **人**（`/router promote`） | 永久，跨项目 |
+| `project` | `projects/<项目>.md` | **人**（`/router promote`） | 每项目永久 |
+| `session` | `sessions/<id>.json` | 模型（`router_note`） | 7 天后清理 |
+| 审计 | `audit.jsonl` | 扩展 | 仅追加，带行号供晋升 |
+
+`router_memory_append` 只写审计，并提醒模型找人晋升；`/router promote 2 project` 是决策变成持久记忆的唯一入口。这就是缩小版的 Mandate：agent 可以记下自己做了什么决定，但没法给自己签发「下次替你做主」的权限。
+
+### 动线示例
+
+```
+你      /router new 加一个 CONTRIBUTING.md，并在 README 里链上它
+Router  t1 已开 · 已派发 · 边界：只动 CONTRIBUTING.md 和 README.md
+        验收：链接能跳转，别的文件不碰
+  ...
+Router  t1 完成 · 2 个文件 · run 4c1e · 详情见 read: task/t1
+```
+
+结果不对？`/router task t1` 看报告和 reason 码，`/router memory audit` 看当时的决策。不用从 diff 反推它是怎么想的。
+
+## 快速开始
 
 ```bash
 pi install npm:pi-subagents
-pi install git:github.com/<you>/pi-superagent-router   # 私有仓库需要 SSH 或 gh auth
+pi install git:github.com/ecoderman/pi-superagent-router
 ```
-
-`router-worker` 随包发布，通过 `package.json` 的 `"pi": { "subagents": { "agents": ["./agents"] } }` 自动被发现，**不需要手动拷贝**。
-
-安装后验证：
-
-```
-pi -p "列出你的 router_* 工具；write 是否可用？可用 agent 里是否有 router-worker？"
-```
-
-预期：9 个 `router_*` 工具、没有 `write`、agent 列表里有 `router-worker`。
-
-### 快速上手
 
 ```bash
-cd 你的项目
-pi
+cd 你的项目 && pi
+```
+
+日常就是直接说人话，斜杠命令只是快捷方式：
+
+```
+> 把 src/store.ts 的锁收尾理一遍，顺手把漏释放的地方修掉，测试要保持通过
+Router  t1 已开 · 已派发 · 边界：src/store.ts
+        验收：锁一定会释放，现有测试保持绿色
+  ...
+Router  t1 完成 · 1 个文件 · run 4c1e · 详情见 read: task/t1
 ```
 
 ```
-/router new 加一个 CONTRIBUTING.md 并在 README 里链接它
-/router status
-/router task t1
+/router new 加一个 CONTRIBUTING.md 并在 README 里链接它   # 同一件事，用命令表达
+/router status                                             # 每个未结束任务一行
+/router task t1                                            # 它做了什么，以及为什么
 ```
 
-也可以直接用自然语言描述目标，Router 会走同样的流程。
+> **先知道只读模式。** 加载了这个扩展的会话都会变成只读 Router，包括你平时写代码的那个。要关掉：`~/.pi/agent/router.json` 里写 `{"routerReadOnly": false}`，或用 `pi -ne`。
 
-### 三层记忆
+## 依赖
 
-记忆按**作用域**分层，而不是按目录堆叠。所有写入都由扩展完成，不经过模型工具。
+| 依赖 | 为什么需要 |
+| --- | --- |
+| [pi](https://github.com/badlogic/pi-mono) `>= 1.5` | 宿主运行时 |
+| [pi-subagents](https://github.com/nicobailon/pi-subagents) | 提供 `subagent` 工具和 worker 运行时；没它 Router 只能记账 |
+| Node.js `>= 20` | 扩展由 pi 的 TypeScript 加载器加载；测试套件需要 `>= 22.6` |
 
-| 层 | 文件 | 谁能写 | 生命周期 |
-|---|---|---|---|
-| `global` | `<home>/global.md` | **只有人**（`/router promote`） | 永久，跨项目共享 |
-| `project` | `<home>/projects/<项目>.md` | **只有人**（`/router promote`） | 每项目永久 |
-| `session` | `<home>/sessions/<会话id>.json` | 模型（`router_note`） | 7 天后清理 |
-| 审计 | `<home>/audit.jsonl` | 扩展 | 仅追加 |
+`router-worker` 随包发布（`"pi": { "subagents": { "agents": ["./agents"] } }`），不用手动拷贝。
 
-- `<home>` 默认 `~/.pi/agent/router/`。共用一个 home 没有问题：每条任务带 `project` 字段，`projects/<项目>.md` 一项目一文件。把配置里的 `"scope"` 设成 `"project"` 可让每个仓库拥有自己的 `.pi/router/`（代价是 `global.md` 也变成每仓一份）。
-- 每轮 `assembleMemory()` 注入一个有界视图：`## global` → `## project` → `## session` → `## open tasks`，每层独立预算，硬上限 4096 字符 / 60 行，并附一行 `budget:` 清单让模型知道被剪了什么。
-- 任务行末尾带指针 `· read: task/t3`；模型在汇报前、或任务处于 `needs-human` 时用 `router_task_get { id }` 解引用。
-- 模型**不能**写 `global` / `project`。`router_memory_append` 只写审计并提示模型请人晋升；`/router promote <n> [global|project]` 把审计第 `n` 行（1 = 最新）复制到目标层。
+## 工具
 
-### 工具
+| 工具 | 作用 |
+| --- | --- |
+| `router_task_open` / `_update` / `_list` / `_get` | 账本：按 key 幂等、reason 码、按需取详情 |
+| `router_note` | 会话记忆：焦点 + 短笔记 |
+| `router_memory_append` | 只写审计，碰不到共享记忆 |
+| `router_memory_read` | 读 `global` / `project` / `session` / `audit` |
+| `router_workers` | runId、状态、会话路径、最后一条报告 |
+| `router_inspect` | `git-status` / `git-log` / `git-diff` / `tree`，固定 argv |
 
-| 工具 | 参数 | 作用 |
-|---|---|---|
-| `router_task_open` | `{ key, goal, cwd?, worktree?, model? }` | 按 `key` 幂等开任务，返回 id |
-| `router_task_update` | `{ id, status?, runId?, report?, deliverables?, next?, reason? }` | 改状态、追加报告、打 reason 码 |
-| `router_task_list` | `{ status? }` | 紧凑表格；`open` 过滤未完成 |
-| `router_task_get` | `{ id, reports? }` | 完整任务 + 最近 N 条报告（0–20），指针目标 |
-| `router_memory_read` | `{ scope?, query?, maxChars? }` | 读 `global` / `project` / `session` / `audit` 或三层拼接 |
-| `router_memory_append` | `{ section, text }` | **只写审计**，绝不写共享记忆 |
-| `router_note` | `{ text, focus? }` | 会话记忆（focus + notes，FIFO 50） |
-| `router_workers` | `{ status?: "active" \| "done" \| "all" }` | 每个 worker 的 runId / 状态 / 会话路径 / 最后报告 |
-| `router_inspect` | `{ cmd: "git-status" \| "git-log" \| "git-diff" \| "tree", limit? }` | 唯一近似 shell 的入口；固定 argv，不接受自由字符串 |
+派活用 pi-subagents 自带的 `subagent` 工具——不包一层，也不重写。
 
-`subagent` 是 pi-subagents 的工具，直接使用——pi-router 不包装、不重写。
+## 命令
 
-### 命令
+| 命令 | 作用 |
+| --- | --- |
+| `/router status` | 每个未结束任务一行，附 open / running / needs-human 计数 |
+| `/router tasks` | 与 `status` 相同 |
+| `/router task <id>` | 单个任务的完整报告时间线 |
+| `/router digest` | 这一轮实际注入系统提示的那一段——模型真正看到的 |
+| `/router memory [scope] [query]` | 读 `global` / `project` / `session` / `audit`；`query` 按行过滤 |
+| `/router session` | 当前会话的焦点与最近笔记 |
+| `/router new <目标>` | 开任务并派发（就是"说目标"的命令形式） |
+| `/router spawn <id>` | 派发一个已开但没派出去的 queued 任务 |
+| `/router promote <n> [global\|project]` | 把审计第 `n` 行（1 = 最新）晋升到全局或项目记忆 |
 
-```
-/router status | tasks | task <id> | digest
-/router memory [scope] [query]     scope: global | project | session | audit
-/router session
-/router new <目标>                 开任务并派发
-/router spawn <id>                 派发一个 queued 任务
-/router promote <n> [global|project]
-```
+## 配置
 
-### 只读模式
-
-默认**所有**加载了该扩展的会话都会变成只读 Router，包括你平时写代码的那个。逃生方式：
-
-```json
-// ~/.pi/agent/router.json（也可放 <cwd>/.pi/router.json，或用 $PI_ROUTER_HOME）
-{ "routerReadOnly": false }
-```
-
-或者用 `pi -ne` 起一个不加载任何扩展的普通会话。
-
-配置项：
+`~/.pi/agent/router.json`，全部可选：
 
 | 字段 | 默认 | 含义 |
-|---|---|---|
-| `scope` | `"global"` | `global` 共用一个 home；`project` 用 `<cwd>/.pi/router` |
-| `home` | `~/.pi/agent/router` | 存储根目录；`scope` 为 `project` 时忽略 |
-| `routerReadOnly` | `true` | 移除并拦截 `write`/`edit`/`bash` |
-| `workerModel` | `null` | 仅作为提示注入，pi-router 自己不派 worker |
-| `maxOpenShown` | `20` | digest 里显示的任务行数 |
-| `progressThrottleMs` | `60000` | 预留给 worker 进度汇报 |
+| --- | --- | --- |
+| `scope` | `"global"` | 共用一个 home，或设 `project` 用 `<cwd>/.pi/router` |
+| `home` | `~/.pi/agent/router` | 存储根目录（`PI_ROUTER_HOME` 可覆盖） |
+| `routerReadOnly` | `true` | 移除并拦截 `write` / `edit` / `bash` |
+| `workerModel` | `null` | 仅作提示；本扩展自己不派 worker |
+| `maxOpenShown` | `20` | digest 里显示几行任务 |
 
-`PI_ROUTER_HOME` 可整体覆盖存储根目录。
+## 局限
 
-### 安全与已知限制
+- **不是沙箱。** worker 用你的权限执行，不弹审批；多个 worker 改同一仓库记得开 `worktree: true`。
+- **不是自主编码器。** 它只把你给的目标派下去，不替你规划项目。
+- **不是工作流引擎。** 并行、重试、worktree、mission 都是 pi-subagents 的活。
+- **不是事件驱动的。** DeepSeek 那套在听 GitHub、飞书和 CI，这一套在听你。
+- **还不稳定。** 0.x 阶段，工具接口可能在次版本间变化。
 
-- worker **不经审批**、以你的系统用户身份执行。pi-router 只是收走 Router 的写工具，**不是沙箱**。多个 worker 改同一仓库时用 `worktree: true`。
-- worker 的完整对话不会进入 Router 上下文，只有最终消息（以及你记录的报告）。要看过程用 `subagent({ action: "status", id, options: { view: "transcript" } })` 或 `router_workers`。
-- `runId` 自动绑定：唯一待派任务直接绑；多个时按派发文本匹配 goal，匹配不到取最新，并在工具结果里说明绑给了谁。需要精确控制时用 `router_task_update { id, runId }` 覆盖。
-- 跨会话无法 resume worker（pi-subagents 限制：只有发起它的会话能 resume）。
-- 从 0.2.x 迁移：旧的 `memory.md` 会一次性拆成 `global.md` + `projects/<项目>.md`，原文件改名 `.migrated-<ts>`；幂等，解析失败时保留原文件。
+## 测试
 
-### 开发
+71 个单元测试，`tsc --noEmit` 干净。CI：Node 22/24 跑测试，Node 20 做类型检查。用 `pi install` 在干净项目实测：9 个 `router_*` 工具、无 `write`、能从包里发现 `router-worker`，一次真实派活产出文件并自动绑定 runId。
 
-```bash
-npm install
-npm run typecheck   # tsc --noEmit
-npm test            # node:test，71 个用例
-```
+## 致谢
 
-目录：`src/`（扩展）、`agents/`（worker 定义）、`test/`、`examples/`。每个版本的设计规格、实施计划、审查记录与返修日志都在 git 历史里（`git log --oneline`、`git show <tag>:docs/BRIEF-v3.md`）。
-
-License: MIT。
+架构、理念与术语来自 DeepSeek 的 [`dsh-superagent-prototype`](https://github.com/deepseek-ai/dsh-superagent-prototype)（MIT）；执行、并发与 worktree 隔离来自 [`pi-subagents`](https://github.com/nicobailon/pi-subagents)。本项目是独立、非官方的极简实现，与两者均无隶属关系。MIT 许可。

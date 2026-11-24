@@ -13,7 +13,7 @@ import {
 } from "../src/config.ts";
 
 async function newDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "pi-router-config-"));
+  return mkdtemp(join(tmpdir(), "pi-superagent-router-config-"));
 }
 
 async function cleanup(dir: string): Promise<void> {

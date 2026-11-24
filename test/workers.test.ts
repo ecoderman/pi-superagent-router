@@ -32,7 +32,7 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 async function newDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "pi-router-workers-"));
+  return mkdtemp(join(tmpdir(), "pi-superagent-router-workers-"));
 }
 
 async function cleanup(dir: string): Promise<void> {
