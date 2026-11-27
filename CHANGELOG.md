@@ -4,6 +4,28 @@
 > development milestones and were never published; they are kept here as a
 > record of how the design evolved.
 
+## 0.5.0 — memory rebuilt: write by blast radius
+
+Breaking. The memory model changed, so the tool and command surface changed with it.
+
+- **Project memory is now model-written and lives in the repo** (`<repo>/.pi/memory.md`),
+  one `## YYYY-MM-DD` section per day, every line carrying its source. `git diff` is the
+  audit trail; injection takes the newest sections until the 1,200-char budget is full.
+- **New `candidates.md`** (`router_candidate`) holds cross-project judgements awaiting a
+  human: ≤200 chars, source required, 5 open max, never injected (only the count is).
+- **`audit.jsonl` is now human-only**: `promote` / `revoke` / `grant` / `migrate`, each with
+  an explicit `n`. Task events no longer land here.
+- **New `events.jsonl`**: shape-only lines (`open` / `dispatch` / `status` / `report`) so
+  duration, peak parallelism and blocked time become measurable. Best-effort writes.
+- `router_memory_append` is gone. Use `router_project_note` (project) or
+  `router_candidate` (global nomination).
+- `/router promote <cN>` now approves a candidate; `/router revoke <n>` withdraws a global
+  rule by audit number; `/router audit` and `/router candidates` are new views.
+- `router_memory_read` scopes are now `global` / `project` / `session` / `candidates`.
+- `assembleMemory` injects `candidates N pending` in the manifest line and renders project
+  memory by date section.
+- Tests: 78 cases, `tsc --noEmit` clean.
+
 ## 0.4.0 — first public release
 
 - CI runs the test suite on Node 22/24 (type stripping needs `>= 22.6`) and

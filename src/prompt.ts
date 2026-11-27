@@ -13,7 +13,9 @@ export const ROUTER_RULES = [
   "报告到达后只做三件事：router_task_update 记账 → 决定下一步 → 必要时向人汇报。",
   "不 sleep、不轮询、不反复查 status；子代理完成会自动唤醒会话。",
   "只有 blocked / 需要人决策时才打扰用户；progress 不转述。",
-  "每个重要决定只写 session/audit，不写 global/project：用 router_note 写会话短时记忆，或用 router_memory_append 写审计理由；要长期保留就请用户执行 `/router promote`。",
+  "记忆分三处写，都有对应工具：项目内的结论用 router_project_note（一行一条，自动带日期和来源任务 id）；会话内的临时进展用 router_note；只有「换个项目也成立、且关于用户」的判断才用 router_candidate（进待审区，用户批准后才成为全局规则）。",
+  "全局记忆只有用户能写：你无权执行 /router promote，也不要替用户做长期决定或催他批准。待审区正文不进你的上下文，你只会看到计数。",
+  "不要为了填满候选而记录：0 条是正常结果；候选一行一句、正文不超过 200 字，且必须带来源。",
   "交付前先 router_task_list 确认没有遗漏的 open 任务。",
 ].join("\n");
 

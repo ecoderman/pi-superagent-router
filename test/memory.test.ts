@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   appendSessionNote,
   assembleMemory,
+  renderProjectSections,
   clampReports,
   emptySession,
   formatAuditLine,
@@ -22,7 +23,18 @@ import {
 import type { AuditLine } from "../src/memory.ts";
 import {
   appendAudit,
+  appendCandidate,
+  appendEvent,
   appendGlobalMemoryLocked,
+  appendProjectNote,
+  eventsPath,
+  hasGlobalMemoryLine,
+  markCandidate,
+  openCandidates,
+  projectMemoryFile,
+  readCandidates,
+  readProjectMemoryAt,
+  removeGlobalMemoryLine,
   appendProjectMemoryLocked,
   appendSessionNoteLocked,
   applyOpen,
@@ -51,7 +63,7 @@ function digestOptions(project = "alpha") {
 
 test("validateMemoryTarget rejects illegal scope/scopeId combinations", () => {
   assert.throws(() => validateMemoryTarget({ scope: "global", scopeId: "x" }), /memory scope:/);
-  assert.throws(() => validateMemoryTarget({ scope: "audit", scopeId: "x" }), /memory scope:/);
+  assert.throws(() => validateMemoryTarget({ scope: "candidates", scopeId: "x" }), /memory scope:/);
   assert.throws(() => validateMemoryTarget({ scope: "project" }), /memory scope:/);
   assert.throws(() => validateMemoryTarget({ scope: "session", scopeId: "" }), /memory scope:/);
   assert.throws(() => validateMemoryTarget({ scope: "project", scopeId: "a/b" }), /memory scope:/);
@@ -60,7 +72,7 @@ test("validateMemoryTarget rejects illegal scope/scopeId combinations", () => {
   assert.throws(() => validateMemoryTarget({ scope: "bogus" as never }), /memory scope:/);
 
   validateMemoryTarget({ scope: "global" });
-  validateMemoryTarget({ scope: "audit" });
+  validateMemoryTarget({ scope: "candidates" });
   validateMemoryTarget({ scope: "project", scopeId: "pi-router" });
   validateMemoryTarget({ scope: "session", scopeId: "session-1" });
 });
@@ -199,7 +211,7 @@ test("session state round-trips and notes are capped at 50 FIFO with focus updat
 });
 
 test("audit lines serialize, truncate text to 200 chars, and parse round-trip", () => {
-  const line = { at: "iso", session: "s", project: "p", kind: "note" as const, text: "x".repeat(250) };
+  const line = { n: 1, at: "iso", session: "s", project: "p", kind: "promote" as const, text: "x".repeat(250) };
   const json = formatAuditLine(line);
   const parsedJson = JSON.parse(json) as { text: string };
   assert.equal(parsedJson.text.length, 200);
@@ -209,50 +221,58 @@ test("audit lines serialize, truncate text to 200 chars, and parse round-trip", 
   assert.equal(truncateText("abc"), "abc");
 
   const parsed = parseAuditLine(JSON.parse(json) as unknown);
-  assert.equal(parsed?.kind, "note");
+  assert.equal(parsed?.kind, "promote");
+  assert.equal(parsed?.n, 1);
   assert.equal(parsed?.text?.length, 200);
   assert.equal(parseAuditLine({ at: "a" }), undefined);
+  assert.equal(parseAuditLine({ at: "a", session: "s", project: "p", kind: "task_open" }), undefined);
 });
 
-test("makeAuditLine assembles required fields for task_open/task_update/dispatch", () => {
-  const opened = makeAuditLine({ at: "iso", session: "s", project: "alpha", kind: "task_open", taskId: "t1" });
-  assert.deepEqual(opened, { at: "iso", session: "s", project: "alpha", kind: "task_open", taskId: "t1" });
-
-  const updated = makeAuditLine({
-    at: "iso",
-    session: "s",
-    project: "beta",
-    kind: "task_update",
-    taskId: "t2",
-    reason: "blocked_question",
-    text: "need input",
-  });
-  assert.deepEqual(updated, {
-    at: "iso",
-    session: "s",
-    project: "beta",
-    kind: "task_update",
-    taskId: "t2",
-    reason: "blocked_question",
-    text: "need input",
-  });
-
-  const dispatched = makeAuditLine({
+test("makeAuditLine assembles promote / revoke / grant fields", () => {
+  const promoted = makeAuditLine({
     at: "iso",
     session: "s",
     project: "alpha",
-    kind: "dispatch",
-    taskId: "t1",
-    runId: "run-1",
+    kind: "promote",
+    target: "global",
+    candidate: "c1",
+    source: "t4 / 2026-11-25",
+    text: "用户偏好中文提交信息。",
   });
-  assert.deepEqual(dispatched, {
+  assert.deepEqual(promoted, {
     at: "iso",
     session: "s",
     project: "alpha",
-    kind: "dispatch",
-    taskId: "t1",
-    runId: "run-1",
+    kind: "promote",
+    target: "global",
+    candidate: "c1",
+    source: "t4 / 2026-11-25",
+    text: "用户偏好中文提交信息。",
   });
+
+  const revoked = makeAuditLine({
+    at: "iso",
+    session: "s",
+    project: "alpha",
+    kind: "revoke",
+    target: "global",
+    reason: "outdated",
+    text: "旧规则",
+  });
+  assert.equal(revoked.kind, "revoke");
+  assert.equal(revoked.reason, "outdated");
+
+  const granted = makeAuditLine({
+    at: "iso",
+    session: "s",
+    project: "alpha",
+    kind: "grant",
+    setting: "projectMemoryWrite",
+    from: false,
+    to: true,
+  });
+  assert.equal(granted.setting, "projectMemoryWrite");
+  assert.equal(granted.to, true);
 });
 
 test("parseMemoryBlocks splits project-tagged and global blocks preserving text", () => {
@@ -332,16 +352,25 @@ test("pruneSessions removes session files older than 7 days", async () => {
   }
 });
 
-test("audit appends one JSON line per write and readAudit filters by project and limit", async () => {
+test("audit appends one JSON line per write, stamps n, and readAudit filters by project and limit", async () => {
   const home = await newHome();
   try {
-    await appendAudit(home, { at: "iso1", session: "s", project: "alpha", kind: "note", text: "a1" });
-    await appendAudit(home, { at: "iso2", session: "s", project: "beta", kind: "note", text: "b1" });
-    await appendAudit(home, { at: "iso3", session: "s", project: "alpha", kind: "task_open", taskId: "t1" });
+    await appendAudit(home, { at: "iso1", session: "s", project: "alpha", kind: "promote", text: "a1" });
+    await appendAudit(home, { at: "iso2", session: "s", project: "beta", kind: "revoke", text: "b1" });
+    await appendAudit(home, {
+      at: "iso3",
+      session: "s",
+      project: "alpha",
+      kind: "grant",
+      setting: "projectMemoryWrite",
+      from: false,
+      to: true,
+    });
 
     const all = await readAudit(home);
     assert.equal(all.length, 3);
     assert.deepEqual(all.map((line) => line.project), ["alpha", "beta", "alpha"]);
+    assert.deepEqual(all.map((line) => line.n), [1, 2, 3]);
 
     const alpha = await readAudit(home, { project: "ALPHA" });
     assert.equal(alpha.length, 2);
@@ -367,7 +396,7 @@ test("appendAudit never mutates global.md or project memory files", async () => 
     const globalText = await readFile(globalFile, "utf8");
     const projectText = await readFile(projectFile, "utf8");
 
-    await appendAudit(home, { at: "iso", session: "s", project: "alpha", kind: "note", text: "audit only" });
+    await appendAudit(home, { at: "iso", session: "s", project: "alpha", kind: "promote", text: "audit only" });
 
     const afterGlobal = await stat(globalFile);
     const afterProject = await stat(projectFile);
@@ -473,28 +502,25 @@ test("migrateMemory rejects escaped [project] tags and keeps the legacy file", a
   }
 });
 
-test("formatAuditView numbers lines newest-first to match /router promote <n>", () => {
-  const line = (at: string, text: string): AuditLine => ({
-    at,
+test("formatAuditView numbers lines by explicit n, newest first", () => {
+  const line = (n: number, text: string): AuditLine => ({
+    n,
+    at: `2026-01-0${n}T00:00:00.000Z`,
     session: "s",
     project: "alpha",
-    kind: "note",
+    kind: "promote",
     text,
   });
   assert.equal(formatAuditView([]), "");
 
-  const view = formatAuditView([
-    line("2026-01-01T00:00:00.000Z", "oldest"),
-    line("2026-01-02T00:00:00.000Z", "middle"),
-    line("2026-01-03T00:00:00.000Z", "newest"),
-  ]);
+  const view = formatAuditView([line(1, "oldest"), line(2, "middle"), line(3, "newest")]);
   const rows = view.split("\n");
   assert.equal(rows.length, 3);
-  assert.ok(rows[2].startsWith("[1] "), rows[2]);
-  assert.ok(rows[2].includes("newest"));
-  assert.ok(rows[1].startsWith("[2] "), rows[1]);
   assert.ok(rows[0].startsWith("[3] "), rows[0]);
-  assert.ok(rows[0].includes("oldest"));
+  assert.ok(rows[0].includes("newest"));
+  assert.ok(rows[1].startsWith("[2] "), rows[1]);
+  assert.ok(rows[2].startsWith("[1] "), rows[2]);
+  assert.ok(rows[2].includes("oldest"));
 });
 
 test("migration is atomic per target and idempotent across a re-run", async () => {
@@ -527,4 +553,148 @@ test("migration is atomic per target and idempotent across a re-run", async () =
   } finally {
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("renderProjectSections keeps newest date sections and marks the omitted ones", () => {
+  const text = [
+    "# alpha",
+    "",
+    "## 2026-11-23",
+    "- 旧结论一",
+    "",
+    "## 2026-11-24",
+    "- 旧结论二",
+    "",
+    "## 2026-11-25",
+    "- 新结论",
+  ].join("\n");
+
+  const roomy = renderProjectSections(text, 1000);
+  assert.ok(roomy.includes("旧结论一"));
+  assert.ok(roomy.includes("新结论"));
+
+  const tight = renderProjectSections(text, 60);
+  assert.ok(tight.includes("## 2026-11-25"), tight);
+  assert.ok(tight.includes("新结论"), tight);
+  assert.ok(!tight.includes("旧结论一"), tight);
+  assert.ok(tight.includes("older sections omitted"), tight);
+  assert.ok(tight.startsWith("# alpha"), tight);
+
+  assert.equal(renderProjectSections("", 100), "");
+  assert.equal(renderProjectSections("- 无日期节", 100), "- 无日期节");
+});
+
+test("appendProjectNote writes into <cwd>/.pi/memory.md with date section and source", async () => {
+  const dir = await newHome();
+  try {
+    const path = await appendProjectNote(dir, "测试用 node --test 跑", "t4");
+    assert.equal(path, projectMemoryFile(dir));
+    const first = await readFile(path, "utf8");
+    assert.ok(first.includes(`## ${new Date().toISOString().slice(0, 10)}`), first);
+    assert.ok(first.includes("- 测试用 node --test 跑（来源 t4）"), first);
+
+    await appendProjectNote(dir, "第二条", "t5");
+    const second = await readFile(path, "utf8");
+    assert.equal(second.split("\n## ").length, 2, second);
+    assert.ok(second.includes("来源 t5"));
+
+    // 仓库内文件优先于旧位置
+    assert.equal(await readProjectMemoryAt(dir, "alpha", dir), second);
+  } finally {
+    await cleanup(dir);
+  }
+});
+
+test("readProjectMemoryAt falls back to the legacy projects/<name>.md", async () => {
+  const home = await newHome();
+  try {
+    await appendProjectMemoryLocked(home, "alpha", "旧位置结论");
+    assert.equal(await readProjectMemoryAt(home, "alpha"), "旧位置结论\n");
+    assert.equal(await readProjectMemoryAt(home, "alpha", join(home, "no-such-repo")), "旧位置结论\n");
+  } finally {
+    await cleanup(home);
+  }
+});
+
+test("candidates: append requires source, caps open at 5, and markCandidate closes one", async () => {
+  const home = await newHome();
+  try {
+    assert.ok((await appendCandidate(home, "正文", "")).error?.includes("来源"));
+    assert.ok((await appendCandidate(home, "x".repeat(201), "t1")).error?.includes("200"));
+    assert.equal((await appendCandidate(home, "", "t1")).error !== undefined, true);
+
+    const first = await appendCandidate(home, "用户偏好中文提交信息。", "t4 / 2026-11-25");
+    assert.equal(first.candidate?.id, "c1");
+
+    for (let i = 2; i <= 5; i += 1) {
+      const result = await appendCandidate(home, `候选 ${i}`, `t${i} / 2026-11-25`);
+      assert.equal(result.candidate?.id, `c${i}`);
+    }
+    const rejected = await appendCandidate(home, "第六条", "t9");
+    assert.ok(rejected.error?.includes("上限"), rejected.error);
+
+    assert.equal(await markCandidate(home, "c2", "approved", "2026-11-26"), true);
+    assert.equal(await markCandidate(home, "c9", "approved"), false);
+
+    const list = await readCandidates(home);
+    assert.equal(list.length, 5);
+    assert.equal(list[1].status, "approved");
+    assert.equal(list[1].resolvedAt, "2026-11-26");
+    assert.equal(openCandidates(list).length, 4);
+    // 关掉一条后又能写入
+    assert.ok((await appendCandidate(home, "第六条", "t9")).candidate);
+  } finally {
+    await cleanup(home);
+  }
+});
+
+test("appendEvent records shape-only lines and never throws", async () => {
+  const home = await newHome();
+  try {
+    await appendEvent(home, {
+      at: "2026-11-25T00:00:00.000Z",
+      kind: "status",
+      taskId: "t1",
+      project: "alpha",
+      session: "s",
+      from: "running",
+      to: "done",
+    });
+    const body = await readFile(eventsPath(home), "utf8");
+    const line = JSON.parse(body.trim()) as Record<string, unknown>;
+    assert.equal(line.kind, "status");
+    assert.equal(line.from, "running");
+    assert.equal(line.summary, undefined);
+  } finally {
+    await cleanup(home);
+  }
+});
+
+test("global memory promote/revoke helpers are line-scoped and idempotent", async () => {
+  const home = await newHome();
+  try {
+    assert.equal(await hasGlobalMemoryLine(home, "用户偏好中文"), false);
+    await appendGlobalMemoryLocked(home, "用户偏好中文提交信息。（来源 t4 / 2026-11-25）");
+    assert.equal(await hasGlobalMemoryLine(home, "用户偏好中文"), true);
+
+    assert.equal(await removeGlobalMemoryLine(home, "用户偏好中文"), true);
+    assert.equal(await hasGlobalMemoryLine(home, "用户偏好中文"), false);
+    assert.equal(await removeGlobalMemoryLine(home, "用户偏好中文"), false);
+  } finally {
+    await cleanup(home);
+  }
+});
+
+test("assembleMemory only injects the candidate count, never the text", () => {
+  const result = assembleMemory({
+    global: "",
+    project: "",
+    projectName: "alpha",
+    session: undefined,
+    tasks: [],
+    digestOptions: digestOptions(),
+    candidates: 2,
+  });
+  assert.ok(result.text.includes("candidates 2 pending"), result.text);
+  assert.ok(!result.text.includes("[c1]"));
 });

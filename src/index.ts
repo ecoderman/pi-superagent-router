@@ -3,25 +3,34 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { homedir, userInfo, tmpdir } from "node:os";
 import {
   appendAudit,
+  appendCandidate,
+  appendEvent,
   appendGlobalMemoryLocked,
-  appendProjectMemoryLocked,
+  appendProjectNote,
   appendSessionNoteLocked,
+  candidatesPath,
+  hasGlobalMemoryLine,
   applyOpen,
   applyUpdate,
   auditPath,
   bindRunId,
   countBy,
+  eventsPath,
   formatTaskRow,
   isOpen,
   loadLedger,
+  markCandidate,
   migrateMemory,
+  openCandidates,
   projectName,
   projectRouterDir,
   pruneSessions,
   readAudit,
+  readCandidates,
   readGlobalMemory,
-  readProjectMemory,
+  readProjectMemoryAt,
   readSession,
+  removeGlobalMemoryLine,
   tasksPath,
   withLedger,
   type UpdatePatch,
@@ -59,7 +68,7 @@ import type { Ledger, RouterConfig, Task } from "./types.ts";
 const TASK_STATUSES = ["queued", "running", "needs-human", "done", "failed", "stopped"] as const;
 const REPORT_STATUSES = ["progress", "blocked", "ready", "failed", "dropped"] as const;
 const REASONS = ["user_request", "blocked_question", "rework", "superseded", "promoted", "other"] as const;
-const MEMORY_SCOPES = ["global", "project", "session", "audit"] as const;
+const MEMORY_SCOPES = ["global", "project", "session", "candidates"] as const;
 
 const StatusEnum = Type.Union(TASK_STATUSES.map((s) => Type.Literal(s)));
 const ReportEnum = Type.Union(REPORT_STATUSES.map((s) => Type.Literal(s)));
@@ -96,11 +105,17 @@ const listSchema = Type.Object({
 });
 type ListParams = Static<typeof listSchema>;
 
-const memoryAppendSchema = Type.Object({
-  section: Type.String(),
-  text: Type.String(),
+const projectNoteSchema = Type.Object({
+  text: Type.String({ minLength: 1, maxLength: 300 }),
+  taskId: Type.Optional(Type.String()),
 });
-type MemoryAppendParams = Static<typeof memoryAppendSchema>;
+type ProjectNoteParams = Static<typeof projectNoteSchema>;
+
+const candidateSchema = Type.Object({
+  text: Type.String({ minLength: 1, maxLength: 200 }),
+  source: Type.String({ minLength: 1 }),
+});
+type CandidateParams = Static<typeof candidateSchema>;
 
 const memoryReadSchema = Type.Object({
   scope: Type.Optional(Type.Union(MEMORY_SCOPES.map((s) => Type.Literal(s)))),
@@ -256,18 +271,25 @@ function sectionView(title: string, body: string): string {
   return `## ${title}\n${body === "" ? "(empty)" : body}`;
 }
 
+function candidatesText(list: Awaited<ReturnType<typeof readCandidates>>): string {
+  if (list.length === 0) return "";
+  return list
+    .map((candidate) => {
+      const mark = candidate.status === "approved" ? "已升" : candidate.status === "rejected" ? "已拒" : "待审";
+      const when = candidate.resolvedAt ? ` ${candidate.resolvedAt}` : "";
+      return `- [${candidate.id}] ${candidate.text}（来源 ${candidate.source}） · ${mark}${when}`;
+    })
+    .join("\n");
+}
+
 async function scopedMemoryText(
   st: RouterState,
   ctx: ExtensionContext,
   scope: MemoryScope | undefined,
-  auditLimit = 40,
 ): Promise<string> {
-  if (scope === "audit") {
-    const lines = await readAudit(st.home, { limit: auditLimit });
-    return formatAuditView(lines);
-  }
   if (scope === "global") return readGlobalMemory(st.home);
-  if (scope === "project") return readProjectMemory(st.home, st.project);
+  if (scope === "candidates") return candidatesText(await readCandidates(st.home));
+  if (scope === "project") return readProjectMemoryAt(st.home, st.project, st.cwd);
   if (scope === "session") {
     const state = await readSession(st.home, sessionId(ctx));
     return state === undefined ? "" : formatSessionText(state);
@@ -275,7 +297,7 @@ async function scopedMemoryText(
 
   const [globalText, projectText, sessionState] = await Promise.all([
     readGlobalMemory(st.home),
-    readProjectMemory(st.home, st.project),
+    readProjectMemoryAt(st.home, st.project, st.cwd),
     readSession(st.home, sessionId(ctx)),
   ]);
   return [
@@ -386,7 +408,13 @@ export default function piRouter(pi: ExtensionAPI): void {
       );
       const { task, created } = txn.result;
       render(ctx, txn.ledger);
-      await appendAudit(st.home, auditLine(st, ctx, "task_open", { project: task.project, taskId: task.id }));
+      await appendEvent(st.home, {
+        at: new Date().toISOString(),
+        kind: "open",
+        taskId: task.id,
+        project: task.project,
+        session: sessionId(ctx),
+      });
 
       const text = created
         ? `已开任务 ${task.id} [${task.status}]（key=${task.key}，project=${task.project}）。下一步：调用 subagent({ agent: "router-worker", task, cwd, worktree }) 派发，再用 router_task_update 写 running（runId 可省略）。`
@@ -421,18 +449,45 @@ export default function piRouter(pi: ExtensionAPI): void {
         deliverables: params.deliverables,
         next: params.next,
       };
-      const txn = await withLedger(st.home, (ledger) => applyUpdate(ledger, params.id, patch), { legacy: st.legacy });
+      let before: Task | undefined;
+      const txn = await withLedger(
+        st.home,
+        (ledger) => {
+          before = ledger.tasks.find((item) => item.id === params.id);
+          return applyUpdate(ledger, params.id, patch);
+        },
+        { legacy: st.legacy },
+      );
       const task = txn.result;
       render(ctx, txn.ledger);
-      await appendAudit(
-        st.home,
-        auditLine(st, ctx, "task_update", {
-          project: task.project,
+
+      const at = new Date().toISOString();
+      const from = before?.status;
+      if (params.status !== undefined && from !== task.status) {
+        const startedAt = before?.createdAt;
+        await appendEvent(st.home, {
+          at,
+          kind: "status",
           taskId: task.id,
-          reason: params.reason,
-          text: params.report?.summary,
-        }),
-      );
+          project: task.project,
+          session: sessionId(ctx),
+          from,
+          to: task.status,
+          ...(startedAt !== undefined && task.status === "running"
+            ? { durMs: Date.parse(at) - Date.parse(startedAt) }
+            : {}),
+        });
+      }
+      if (params.report !== undefined) {
+        await appendEvent(st.home, {
+          at,
+          kind: "report",
+          taskId: task.id,
+          project: task.project,
+          session: sessionId(ctx),
+          report: params.report.status,
+        });
+      }
 
       const reportNote = params.report ? `；报告已追加，共 ${task.reports.length} 条` : "";
       const text = `${task.id} [${task.status}]${reportNote}`;
@@ -482,19 +537,57 @@ export default function piRouter(pi: ExtensionAPI): void {
   });
 
   pi.registerTool({
-    name: "router_memory_append",
-    label: "Router: Append Memory",
+    name: "router_project_note",
+    label: "Router: Project Note",
     description:
-      "把一条决策理由追加到审计日志 audit.jsonl（append-only）。只写审计，绝不写 global/project；要长期保留请让用户执行 /router promote。section 用于归类，会拼进 text 前缀。",
-    promptSnippet: "Router: 追加一条决策记录到审计日志",
-    parameters: memoryAppendSchema,
-    async execute(_toolCallId, params: MemoryAppendParams, _signal, _onUpdate, ctx) {
+      "写一条项目记忆到仓库内 .pi/memory.md（按日期分节、自动带来源）。项目记忆模型可以直接写：错了只影响这个项目。一行一条、只写这个项目怎么做事的结论（命令、约定、坑），不写一次性任务结果。",
+    promptSnippet: "Router: 写一条项目记忆（仓库内，按日期分节）",
+    parameters: projectNoteSchema,
+    async execute(_toolCallId, params: ProjectNoteParams, _signal, _onUpdate, ctx) {
       const st = await ensureState(ctx);
-      const text = `[${params.section}] ${params.text}`;
-      await appendAudit(st.home, auditLine(st, ctx, "note", { text }));
+      const source = params.taskId ?? `session ${sessionId(ctx).slice(0, 8)}`;
+      try {
+        const path = await appendProjectNote(st.cwd, params.text, source);
+        return {
+          content: [{ type: "text", text: `已写入项目记忆（来源 ${source}）：${path}` }],
+          details: { path, source },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `项目记忆写入失败：${(error as Error).message}` }],
+          details: { error: (error as Error).message },
+          isError: true,
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "router_candidate",
+    label: "Router: Candidate",
+    description:
+      "提交一条待审的全局记忆候选（写 candidates.md，正文不超过 200 字，必须带来源如 t4 / 2026-11-25）。只有「换个项目也成立、且关于用户」的判断才配进这里；用户批准前不会生效，也不会进上下文。待审最多 5 条。",
+    promptSnippet: "Router: 提交一条待审的全局记忆候选",
+    parameters: candidateSchema,
+    async execute(_toolCallId, params: CandidateParams, _signal, _onUpdate, ctx) {
+      const st = await ensureState(ctx);
+      const result = await appendCandidate(st.home, params.text, params.source);
+      if (result.error !== undefined) {
+        return {
+          content: [{ type: "text", text: `候选未写入：${result.error}` }],
+          details: { error: result.error },
+          isError: true,
+        };
+      }
+      const pending = openCandidates(await readCandidates(st.home)).length;
       return {
-        content: [{ type: "text", text: "已记入审计；要长期保留请让我执行 `/router promote`" }],
-        details: { path: auditPath(st.home), section: params.section },
+        content: [
+          {
+            type: "text",
+            text: `已提交候选 ${result.candidate?.id}（待审 ${pending} 条）。它不会生效，需用户执行 /router promote ${result.candidate?.id}。`,
+          },
+        ],
+        details: { id: result.candidate?.id, pending, path: candidatesPath(st.home) },
       };
     },
   });
@@ -503,12 +596,12 @@ export default function piRouter(pi: ExtensionAPI): void {
     name: "router_memory_read",
     label: "Router: Read Memory",
     description:
-      "读取分层记忆。scope 可为 global/project/session/audit；缺省按 global → project → session 三段拼接。query 大小写不敏感行过滤（沿用 v2 语义）；audit 返回最近 40 行。",
+      "读取记忆。scope 可为 global（长期规则）/ project（本仓库结论，按日期分节）/ session（本次会话）/ candidates（待审候选）；缺省按 global → project → session 三段拼接。query 大小写不敏感行过滤。",
     promptSnippet: "Router: 读取/过滤分层记忆",
     parameters: memoryReadSchema,
     async execute(_toolCallId, params: MemoryReadParams, _signal, _onUpdate, ctx) {
       const st = await ensureState(ctx);
-      const text = await scopedMemoryText(st, ctx, params.scope, 40);
+      const text = await scopedMemoryText(st, ctx, params.scope);
       const view = memoryView(text, params.query, params.maxChars ?? 8000);
       return {
         content: [{ type: "text", text: view.lines.join("\n") }],
@@ -700,10 +793,11 @@ export default function piRouter(pi: ExtensionAPI): void {
     try {
       const migration = await migrateMemory(st.home);
       if (migration.warning) memoryWarning = migration.warning;
-      const [globalText, projectText, sessionState] = await Promise.all([
+      const [globalText, projectText, sessionState, candidateList] = await Promise.all([
         readGlobalMemory(st.home),
-        readProjectMemory(st.home, st.project),
+        readProjectMemoryAt(st.home, st.project, st.cwd),
         readSession(st.home, sessionId(ctx)),
+        readCandidates(st.home),
       ]);
       assembled = assembleMemory({
         global: globalText,
@@ -712,6 +806,7 @@ export default function piRouter(pi: ExtensionAPI): void {
         session: sessionState,
         tasks: ledger.tasks,
         digestOptions,
+        candidates: openCandidates(candidateList).length,
       });
     } catch (error) {
       // 读盘失败（除 ENOENT）时回退 v2 digest，绝不让 hook 抛错。
@@ -765,10 +860,14 @@ export default function piRouter(pi: ExtensionAPI): void {
       );
       const binding = bound.result;
       if (!binding) return;
-      await appendAudit(
-        st.home,
-        auditLine(st, ctx, "dispatch", { project: binding.task.project, taskId: binding.task.id, runId }),
-      );
+      await appendEvent(st.home, {
+        at: new Date().toISOString(),
+        kind: "dispatch",
+        taskId: binding.task.id,
+        project: binding.task.project,
+        session: sessionId(ctx),
+        runId,
+      });
       // 非唯一候选的绑定告诉模型一声，避免它以为 runId 没记上而重复派发或手工补录。
       if (binding.rule === "single") return;
       const why = binding.rule === "goal" ? "按派发文本匹配 goal" : "多个待派发任务，取最新创建者";
@@ -786,9 +885,9 @@ export default function piRouter(pi: ExtensionAPI): void {
 
   pi.registerCommand("router", {
     description:
-      "router: status | tasks | task <id> | memory [scope] [query] | digest | new <goal> | spawn <id> | promote <行号> [global|project] | session",
+      "router: status | tasks | task <id> | memory [scope] [query] | candidates | audit | digest | new <goal> | spawn <id> | promote <cN> | revoke <n> | session",
     getArgumentCompletions: (prefix) =>
-      ["status", "tasks", "task ", "memory ", "digest", "new ", "spawn ", "promote ", "session"]
+      ["status", "tasks", "task ", "memory ", "candidates", "audit", "digest", "new ", "spawn ", "promote ", "revoke ", "session"]
         .filter((value) => value.startsWith(prefix))
         .map((value) => ({ value, label: value.trim() })),
     handler: async (args, ctx) => {
@@ -824,7 +923,7 @@ export default function piRouter(pi: ExtensionAPI): void {
         } else {
           query = rest === "" ? undefined : rest;
         }
-        const text = await scopedMemoryText(st, ctx, scope, 40);
+        const text = await scopedMemoryText(st, ctx, scope);
         ctx.ui.setWidget("router", memoryView(text, query, 8000).lines);
       } else if (input === "session") {
         const state = await readSession(st.home, sessionId(ctx));
@@ -837,32 +936,68 @@ export default function piRouter(pi: ExtensionAPI): void {
           else for (const note of notes) lines.push(`[${note.at}] ${note.text}`);
           ctx.ui.setWidget("router", lines);
         }
-      } else if (input === "promote" || input.startsWith("promote ")) {
-        const rest = input === "promote" ? "" : input.slice(8).trim();
-        const tokens = rest === "" ? [] : rest.split(/\s+/);
-        const n = tokens.length > 0 ? Number.parseInt(tokens[0], 10) : Number.NaN;
-        if (!Number.isInteger(n) || n < 1 || (tokens[1] !== undefined && tokens[1] !== "global" && tokens[1] !== "project")) {
-          ctx.ui.notify("用法：/router promote <audit行号> [global|project]", "error");
+      } else if (input === "audit") {
+        const lines = await readAudit(st.home);
+        ctx.ui.setWidget("router", [formatAuditView(lines.slice(-40)) || "(审计为空：只记录人做的决定)"]);
+      } else if (input === "candidates") {
+        const list = await readCandidates(st.home);
+        ctx.ui.setWidget("router", [candidatesText(list) || "(无候选)"]);
+      } else if (input.startsWith("promote ")) {
+        const id = input.slice(8).trim();
+        const list = await readCandidates(st.home);
+        const candidate = list.find((item) => item.id === id);
+        if (!candidate) {
+          ctx.ui.notify(`router: 无候选 ${id}（用 /router candidates 看编号）`, "error");
           return;
         }
-        const target: "global" | "project" = tokens[1] === "global" ? "global" : "project";
-        const audit = await readAudit(st.home);
-        if (n > audit.length) {
-          ctx.ui.notify(`router: 审计只有 ${audit.length} 行，无第 ${n} 行`, "error");
+        if (candidate.status !== "open") {
+          ctx.ui.notify(`router: 候选 ${id} 已处理过`, "error");
           return;
         }
-        const line = audit[audit.length - n];
-        if (!line.text || line.text.trim() === "") {
-          ctx.ui.notify(`router: 审计第 ${n} 行没有可晋升的 text`, "error");
-          return;
-        }
-        if (target === "global") await appendGlobalMemoryLocked(st.home, line.text);
-        else await appendProjectMemoryLocked(st.home, st.project, line.text);
-        await appendAudit(st.home, auditLine(st, ctx, "promote", { taskId: line.taskId, reason: "promoted", text: line.text }));
+        const already = await hasGlobalMemoryLine(st.home, candidate.text);
+        if (!already) await appendGlobalMemoryLocked(st.home, `${candidate.text}（来源 ${candidate.source}）`);
+        await markCandidate(st.home, id, "approved");
+        await appendAudit(
+          st.home,
+          auditLine(st, ctx, "promote", {
+            target: "global",
+            candidate: id,
+            source: candidate.source,
+            text: candidate.text,
+          }),
+        );
         ctx.ui.notify(
-          `router: 已晋升审计第 ${n} 行到 ${target === "global" ? "global.md" : `projects/${st.project}.md`}`,
+          already ? `router: ${id} 已在 global.md 里（幂等，未重复写）` : `router: 已把 ${id} 晋升到 global.md`,
           "info",
         );
+      } else if (input.startsWith("revoke ")) {
+        const n = Number.parseInt(input.slice(7).trim(), 10);
+        if (!Number.isInteger(n) || n < 1) {
+          ctx.ui.notify("用法：/router revoke <审计编号>（编号用 /router audit 查）", "error");
+          return;
+        }
+        const lines = await readAudit(st.home);
+        const target = lines.find((line) => line.n === n);
+        if (!target) {
+          ctx.ui.notify(`router: 审计无第 ${n} 行`, "error");
+          return;
+        }
+        if (target.kind !== "promote" || target.text === undefined) {
+          ctx.ui.notify(`router: 第 ${n} 行是 ${target.kind}，只能撤销 promote 行`, "error");
+          return;
+        }
+        const removed = await removeGlobalMemoryLine(st.home, target.text);
+        await appendAudit(
+          st.home,
+          auditLine(st, ctx, "revoke", {
+            target: "global",
+            candidate: target.candidate,
+            source: target.source,
+            text: target.text,
+            reason: "user_request",
+          }),
+        );
+        ctx.ui.notify(removed ? `router: 已从 global.md 撤回第 ${n} 行` : `router: 第 ${n} 行在 global.md 里已找不到`, "info");
       } else if (input.startsWith("new ")) {
         // 手动开任务：不在扩展里派活，而是把指令交给模型，由它按 ROUTER_RULES 走
         // router_task_open -> subagent -> router_task_update 的完整流程。
@@ -893,7 +1028,7 @@ export default function piRouter(pi: ExtensionAPI): void {
         );
       } else {
         ctx.ui.notify(
-          "router: 支持 status | tasks | task <id> | memory [scope] [query] | digest | new <目标> | spawn <id> | promote <行号> [global|project] | session",
+          "router: 支持 status | tasks | task <id> | memory [scope] [query] | candidates | audit | digest | new <目标> | spawn <id> | promote <cN> | revoke <n> | session",
           "error",
         );
         return;

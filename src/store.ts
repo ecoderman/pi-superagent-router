@@ -2,7 +2,17 @@ import { appendFile, mkdir, open, readFile, readdir, realpath, rename, rm, stat,
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import type { Ledger, Report, ReportReason, ReportStatus, Task, TaskStatus } from "./types.ts";
+import type {
+  Candidate,
+  CandidateStatus,
+  EventLine,
+  Ledger,
+  Report,
+  ReportReason,
+  ReportStatus,
+  Task,
+  TaskStatus,
+} from "./types.ts";
 import {
   appendSessionNote,
   emptySession,
@@ -75,6 +85,21 @@ export function sessionPath(home: string, sessionId: string): string {
 
 export function auditPath(home: string): string {
   return join(home, "audit.jsonl");
+}
+
+/** 候选区：提案，模型可写，永不进注入正文。 */
+export function candidatesPath(home: string): string {
+  return join(home, "candidates.md");
+}
+
+/** 工作流水：只记形状，尽力而为，不当真相源。 */
+export function eventsPath(home: string): string {
+  return join(home, "events.jsonl");
+}
+
+/** 项目记忆跟仓库走：<cwd>/.pi/memory.md（模型可写，进注入）。 */
+export function projectMemoryFile(cwd: string): string {
+  return join(cwd, ".pi", "memory.md");
 }
 
 export function lockPath(home: string): string {
@@ -794,6 +819,160 @@ export async function readProjectMemory(home: string, project: string): Promise<
   }
 }
 
+/** 读项目记忆：优先仓库内 `.pi/memory.md`（跟着仓库走），回退旧位置 `projects/<project>.md`。 */
+export async function readProjectMemoryAt(home: string, project: string, cwd?: string): Promise<string> {
+  if (cwd) {
+    try {
+      return await readFile(projectMemoryFile(cwd), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return readProjectMemory(home, project);
+}
+
+function daySection(now = new Date()): string {
+  return `## ${now.toISOString().slice(0, 10)}`;
+}
+
+/**
+ * 追加一条项目记忆：按日期分节、每行带来源，整份 temp+rename 写。
+ * 模型可以直接写这一层（错了只影响一个项目），不需要人工批准。
+ */
+export async function appendProjectNote(cwd: string, text: string, source?: string): Promise<string> {
+  const target = projectMemoryFile(cwd);
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  let existing = "";
+  try {
+    existing = await readFile(target, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const trimmed = existing.replace(/\s+$/, "");
+  const line = source ? `- ${text}（来源 ${source}）` : `- ${text}`;
+  const section = daySection();
+  let next: string;
+  if (trimmed === "") next = `# ${basename(cwd)}\n\n${section}\n${line}\n`;
+  else if (trimmed.includes(section)) next = `${trimmed}\n${line}\n`;
+  else next = `${trimmed}\n\n${section}\n${line}\n`;
+
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, next, "utf8");
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+  return target;
+}
+
+export const MAX_OPEN_CANDIDATES = 5;
+
+/** `- [c1] 正文（来源 t4 / 2026-11-25） · 已升 2026-11-25` */
+const CANDIDATE_LINE = /^-\s+\[(c\d+)\]\s+(.*?)\s*（来源\s*([^）]*)）(?:\s*·\s*(已升|已拒)\s*(\S*))?\s*$/;
+
+export function parseCandidates(text: string): Candidate[] {
+  const out: Candidate[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const match = CANDIDATE_LINE.exec(raw.trim());
+    if (!match) continue;
+    const status: CandidateStatus = match[4] === "已升" ? "approved" : match[4] === "已拒" ? "rejected" : "open";
+    const candidate: Candidate = {
+      id: match[1],
+      text: match[2],
+      source: match[3].trim(),
+      status,
+      at: "",
+    };
+    if (status !== "open" && match[5]) candidate.resolvedAt = match[5];
+    out.push(candidate);
+  }
+  return out;
+}
+
+export async function readCandidates(home: string): Promise<Candidate[]> {
+  try {
+    return parseCandidates(await readFile(candidatesPath(home), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+export function openCandidates(list: readonly Candidate[]): Candidate[] {
+  return list.filter((candidate) => candidate.status === "open");
+}
+
+export interface AppendCandidateResult {
+  candidate?: Candidate;
+  error?: string;
+}
+
+/** 追加一条候选：正文 ≤200 字、必须带来源、未处理的上限 5 条。 */
+export async function appendCandidate(home: string, text: string, source: string): Promise<AppendCandidateResult> {
+  const body = text.trim();
+  const src = source.trim();
+  if (body === "") return { error: "候选正文不能为空" };
+  if (body.length > 200) return { error: `候选正文 ${body.length} 字，超过 200 字上限，请压缩成一句` };
+  if (src === "") return { error: "候选必须带来源（任务 id / 日期），没有来源的候选不值得看" };
+
+  const list = await readCandidates(home);
+  const open = openCandidates(list);
+  if (open.length >= MAX_OPEN_CANDIDATES) {
+    return { error: `待审已有 ${open.length} 条（上限 ${MAX_OPEN_CANDIDATES}），请先合并或等用户处理` };
+  }
+  const nextId = `c${list.length + 1}`;
+  await mkdir(home, { recursive: true });
+  await appendFile(candidatesPath(home), `- [${nextId}] ${body}（来源 ${src}）\n`, "utf8");
+  return { candidate: { id: nextId, text: body, source: src, status: "open", at: new Date().toISOString() } };
+}
+
+/** 标记候选已处理（已升 / 已拒）：整份重写，未命中返回 false。 */
+export async function markCandidate(
+  home: string,
+  id: string,
+  status: Exclude<CandidateStatus, "open">,
+  resolvedAt = new Date().toISOString().slice(0, 10),
+): Promise<boolean> {
+  let text: string;
+  try {
+    text = await readFile(candidatesPath(home), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const label = status === "approved" ? "已升" : "已拒";
+  let hit = false;
+  const lines = text.split(/\r?\n/).map((raw) => {
+    const match = CANDIDATE_LINE.exec(raw.trim());
+    if (!match || match[1] !== id || match[4] !== undefined) return raw;
+    hit = true;
+    return `- [${match[1]}] ${match[2]}（来源 ${match[3]}） · ${label} ${resolvedAt}`;
+  });
+  if (!hit) return false;
+
+  const target = candidatesPath(home);
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, lines.join("\n"), "utf8");
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+  return true;
+}
+
+/** 工作流水：尽力而为，写失败不影响任务；读的时候以 tasks.json 为准。 */
+export async function appendEvent(home: string, line: EventLine): Promise<void> {
+  try {
+    await mkdir(home, { recursive: true });
+    await appendFile(eventsPath(home), `${JSON.stringify(line)}\n`, "utf8");
+  } catch {
+    // 流水是旁证，失败静默
+  }
+}
+
 export async function readSession(home: string, sessionId: string): Promise<SessionState | undefined> {
   let text: string;
   try {
@@ -877,12 +1056,18 @@ export async function pruneSessions(home: string, maxAgeMs: number = SESSION_MAX
   });
 }
 
-export async function appendAudit(home: string, line: AuditLine): Promise<void> {
+/** 追加一行审计：n 自增分配（读全文件取最大号 + 1），写失败静默。 */
+export async function appendAudit(home: string, line: AuditLine): Promise<AuditLine | undefined> {
   try {
     await mkdir(home, { recursive: true });
-    await appendFile(auditPath(home), `${formatAuditLine(line)}\n`, "utf8");
+    const existing = await readAudit(home);
+    const n = existing.reduce((max, item) => Math.max(max, item.n ?? 0), 0) + 1;
+    const stamped: AuditLine = { ...line, n };
+    await appendFile(auditPath(home), `${formatAuditLine(stamped)}\n`, "utf8");
+    return stamped;
   } catch {
     // 审计失败静默，不影响主流程
+    return undefined;
   }
 }
 
@@ -909,6 +1094,13 @@ export async function readAudit(
     }
   }
 
+  // 旧文件没有 n：按行号补，保证 [n] 视图稳定
+  let next = 1;
+  for (const line of lines) {
+    if (line.n === undefined) line.n = next;
+    next = Math.max(next, line.n + 1);
+  }
+
   let result = lines;
   const projectFilter = opts?.project;
   if (projectFilter !== undefined) {
@@ -920,6 +1112,40 @@ export async function readAudit(
     result = n === 0 ? [] : result.slice(-n);
   }
   return result;
+}
+
+/** 全局记忆里是否已有同一行（按正文包含判断，用于 promote 幂等）。 */
+export async function hasGlobalMemoryLine(home: string, text: string): Promise<boolean> {
+  const body = await readGlobalMemory(home);
+  const needle = text.trim();
+  if (needle === "") return false;
+  return body.split(/\r?\n/).some((line) => line.includes(needle));
+}
+
+/** 删除全局记忆里包含该正文的行（整份 temp+rename）；返回是否删到。 */
+export async function removeGlobalMemoryLine(home: string, text: string): Promise<boolean> {
+  let body: string;
+  try {
+    body = await readFile(globalMemoryPath(home), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  const needle = text.trim();
+  if (needle === "") return false;
+  const lines = body.split(/\r?\n/);
+  const kept = lines.filter((line) => !line.includes(needle));
+  if (kept.length === lines.length) return false;
+
+  const target = globalMemoryPath(home);
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, kept.join("\n"), "utf8");
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { force: true });
+  }
+  return true;
 }
 
 export async function appendGlobalMemoryLocked(home: string, text: string, options?: LockOptions): Promise<void> {

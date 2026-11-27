@@ -1,8 +1,9 @@
-import type { Report, Task } from "./types.ts";
+import type { AuditKind, AuditLine, Report, Task } from "./types.ts";
+export type { AuditKind, AuditLine };
 import type { DigestOptions } from "./prompt.ts";
 import { clampOpenShown, projectOpenTasks, taskRow } from "./prompt.ts";
 
-export type MemoryScope = "global" | "project" | "session" | "audit";
+export type MemoryScope = "global" | "project" | "session" | "candidates";
 
 export interface MemoryTarget {
   scope: MemoryScope;
@@ -21,19 +22,6 @@ export interface SessionState {
   focus: string;
   notes: SessionNote[];
   updatedAt: string;
-}
-
-export type AuditKind = "note" | "task_open" | "task_update" | "dispatch" | "promote" | "migrate";
-
-export interface AuditLine {
-  at: string;
-  session: string;
-  project: string;
-  kind: AuditKind;
-  taskId?: string;
-  runId?: string;
-  reason?: string;
-  text?: string;
 }
 
 export interface LayerBudget {
@@ -64,6 +52,8 @@ export interface AssembleMemoryInput {
   tasks: Task[];
   digestOptions: DigestOptions;
   budget?: Partial<LayerBudget>;
+  /** 待审候选数：只注入计数，正文永不进上下文。 */
+  candidates?: number;
 }
 
 const MAX_SESSION_NOTES = 50;
@@ -83,26 +73,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isMemoryScope(value: unknown): value is MemoryScope {
-  return value === "global" || value === "project" || value === "session" || value === "audit";
+  return value === "global" || value === "project" || value === "session" || value === "candidates";
 }
 
 function isAuditKind(value: unknown): value is AuditKind {
-  return (
-    value === "note" ||
-    value === "task_open" ||
-    value === "task_update" ||
-    value === "dispatch" ||
-    value === "promote" ||
-    value === "migrate"
-  );
+  return value === "promote" || value === "revoke" || value === "grant" || value === "migrate";
 }
 
-/** 数据层校验：global/audit 不得带 scopeId；project/session 必须给非空且不含路径逃逸片段的 scopeId。 */
+/** 数据层校验：global/candidates 不得带 scopeId；project/session 必须给非空且不含路径逃逸片段的 scopeId。 */
 export function validateMemoryTarget(target: MemoryTarget): void {
   if (!isMemoryScope(target.scope)) {
     throw new Error(`memory scope: 未知 scope ${String(target.scope)}`);
   }
-  if (target.scope === "global" || target.scope === "audit") {
+  if (target.scope === "global" || target.scope === "candidates") {
     if (target.scopeId !== undefined) {
       throw new Error(`memory scope: ${target.scope} 不得带 scopeId`);
     }
@@ -190,13 +173,17 @@ export interface AuditLineInput {
   session: string;
   project: string;
   kind: AuditKind;
-  taskId?: string;
-  runId?: string;
+  target?: "global";
+  candidate?: string;
+  source?: string;
   reason?: string;
   text?: string;
+  setting?: string;
+  from?: string | boolean;
+  to?: string | boolean;
 }
 
-/** 由扩展代码构造审计行；必填 at/session/project/kind，其余可选字段缺省不写。 */
+/** 由扩展代码构造审计行；`n` 由 appendAudit 分配，构造时不填。 */
 export function makeAuditLine(input: AuditLineInput): AuditLine {
   const line: AuditLine = {
     at: input.at,
@@ -204,24 +191,33 @@ export function makeAuditLine(input: AuditLineInput): AuditLine {
     project: input.project,
     kind: input.kind,
   };
-  if (input.taskId !== undefined) line.taskId = input.taskId;
-  if (input.runId !== undefined) line.runId = input.runId;
+  if (input.target !== undefined) line.target = input.target;
+  if (input.candidate !== undefined) line.candidate = input.candidate;
+  if (input.source !== undefined) line.source = input.source;
   if (input.reason !== undefined) line.reason = input.reason;
   if (input.text !== undefined) line.text = input.text;
+  if (input.setting !== undefined) line.setting = input.setting;
+  if (input.from !== undefined) line.from = input.from;
+  if (input.to !== undefined) line.to = input.to;
   return line;
 }
 
 export function formatAuditLine(line: AuditLine): string {
   const record: Record<string, unknown> = {
+    n: line.n,
     at: line.at,
     session: line.session,
     project: line.project,
     kind: line.kind,
   };
-  if (line.taskId !== undefined) record.taskId = line.taskId;
-  if (line.runId !== undefined) record.runId = line.runId;
+  if (line.target !== undefined) record.target = line.target;
+  if (line.candidate !== undefined) record.candidate = line.candidate;
+  if (line.source !== undefined) record.source = line.source;
   if (line.reason !== undefined) record.reason = line.reason;
   if (line.text !== undefined) record.text = truncateText(line.text);
+  if (line.setting !== undefined) record.setting = line.setting;
+  if (line.from !== undefined) record.from = line.from;
+  if (line.to !== undefined) record.to = line.to;
   return JSON.stringify(record);
 }
 
@@ -234,10 +230,15 @@ export function parseAuditLine(raw: unknown): AuditLine | undefined {
   if (!isAuditKind(raw.kind)) return undefined;
 
   const line: AuditLine = { at: raw.at, session: raw.session, project: raw.project, kind: raw.kind };
-  if (typeof raw.taskId === "string") line.taskId = raw.taskId;
-  if (typeof raw.runId === "string") line.runId = raw.runId;
+  if (typeof raw.n === "number" && Number.isInteger(raw.n) && raw.n > 0) line.n = raw.n;
+  if (raw.target === "global") line.target = "global";
+  if (typeof raw.candidate === "string") line.candidate = raw.candidate;
+  if (typeof raw.source === "string") line.source = raw.source;
   if (typeof raw.reason === "string") line.reason = raw.reason;
   if (typeof raw.text === "string") line.text = raw.text;
+  if (typeof raw.setting === "string") line.setting = raw.setting;
+  if (typeof raw.from === "string" || typeof raw.from === "boolean") line.from = raw.from;
+  if (typeof raw.to === "string" || typeof raw.to === "boolean") line.to = raw.to;
   return line;
 }
 
@@ -382,13 +383,63 @@ function capBody(blocks: string[], maxChars: number, maxLines: number): CappedBo
   return { body: `${body}\n${marker}`, droppedCount: blocks.length - kept, charTrimmed };
 }
 
-function manifestText(layers: readonly RenderedLayer[], budget: LayerBudget): string {
+function manifestText(layers: readonly RenderedLayer[], budget: LayerBudget, candidates = 0): string {
   return (
     `budget: global ${layers[0].chars}/${budget.global} · ` +
     `project ${layers[1].chars}/${budget.project} · ` +
     `session ${layers[2].chars}/${budget.session} · ` +
-    `tasks ${layers[3].chars}/${budget.tasks}`
+    `tasks ${layers[3].chars}/${budget.tasks}` +
+    (candidates > 0 ? ` · candidates ${candidates} pending` : "")
   );
+}
+
+const DATE_SECTION = /^##\s+(\d{4}-\d{2}-\d{2})\s*$/;
+
+/**
+ * 项目记忆按日期分节渲染：从最新一节往前取，直到预算用完；早期小节整节省略并标注。
+ * 没有日期节的旧文件原样返回，交给 renderLayer 的字符预算处理。
+ */
+export function renderProjectSections(text: string, budget: number): string {
+  const trimmed = text.trim();
+  if (trimmed === "") return "";
+  const lines = trimmed.split(/\r?\n/);
+  const preamble: string[] = [];
+  const sections: string[] = [];
+  let current: string[] | undefined;
+  for (const line of lines) {
+    if (DATE_SECTION.test(line)) {
+      if (current) sections.push(current.join("\n").trim());
+      current = [line];
+      continue;
+    }
+    if (current) current.push(line);
+    else preamble.push(line);
+  }
+  if (current) sections.push(current.join("\n").trim());
+  if (sections.length === 0) return trimmed;
+
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = sections.length - 1; i >= 0; i -= 1) {
+    const section = sections[i];
+    if (used + section.length + 2 <= budget) {
+      kept.unshift(section);
+      used += section.length + 2;
+    } else if (kept.length === 0) {
+      kept.unshift(`${truncateText(section, Math.max(0, budget - 1))}…`);
+      break;
+    } else {
+      break;
+    }
+  }
+
+  const head = preamble.join("\n").trim();
+  const omitted = sections.length - kept.length;
+  const parts: string[] = [];
+  if (head !== "") parts.push(head);
+  parts.push(...kept);
+  if (omitted > 0) parts.push(`…(${omitted} older sections omitted)`);
+  return parts.join("\n\n");
 }
 
 /**
@@ -400,7 +451,12 @@ export function assembleMemory(input: AssembleMemoryInput): AssembledContext {
   const budget = resolveBudget(input.budget);
   const layers: RenderedLayer[] = [
     renderLayer("global", "## global", input.global, budget.global),
-    renderLayer("project", `## project ${input.projectName}`, input.project, budget.project),
+    renderLayer(
+      "project",
+      `## project ${input.projectName}`,
+      renderProjectSections(input.project, budget.project),
+      budget.project,
+    ),
     renderLayer("session", "## session", sessionBody(input.session), budget.session),
     renderLayer("tasks", "## open tasks", tasksBody(input), budget.tasks),
   ];
@@ -408,7 +464,7 @@ export function assembleMemory(input: AssembleMemoryInput): AssembledContext {
   const blocks = layers.map((layer) => `${layer.title}\n${layer.display}`);
 
   // 先按封顶前的 manifest 长度给正文留预算；重算后的 manifest 分子只会缩短，不会让总量超 4096。
-  const manifestBudget = manifestText(layers, budget);
+  const manifestBudget = manifestText(layers, budget, input.candidates ?? 0);
   const maxBodyChars = Math.max(0, MAX_CHARS - manifestBudget.length - 1);
   const maxBodyLines = MAX_LINES - 1;
   const capped = capBody(blocks, maxBodyChars, maxBodyLines);
@@ -433,7 +489,7 @@ export function assembleMemory(input: AssembleMemoryInput): AssembledContext {
     }
   }
 
-  const manifest = manifestText(layers, budget);
+  const manifest = manifestText(layers, budget, input.candidates ?? 0);
   return {
     text: `${capped.body}\n${manifest}`,
     layers: layers.map((layer) => ({
@@ -463,5 +519,17 @@ export function latestReports(reports: readonly Report[], count: number): Report
  */
 export function formatAuditView(lines: readonly AuditLine[]): string {
   if (lines.length === 0) return "";
-  return lines.map((line, index) => `[${lines.length - index}] ${formatAuditLine(line)}`).join("\n");
+  return [...lines]
+    .sort((a, b) => (b.n ?? 0) - (a.n ?? 0))
+    .map((line) => {
+      const parts = [`[${line.n ?? "?"}]`, line.at, line.kind];
+      if (line.candidate) parts.push(`candidate=${line.candidate}`);
+      if (line.source) parts.push(`source=${line.source}`);
+      if (line.target) parts.push(`target=${line.target}`);
+      if (line.reason) parts.push(`reason=${line.reason}`);
+      if (line.setting) parts.push(`${line.setting}: ${String(line.from)} -> ${String(line.to)}`);
+      const head = parts.join(" ");
+      return line.text ? `${head} — ${truncateText(line.text)}` : head;
+    })
+    .join("\n");
 }

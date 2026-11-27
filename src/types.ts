@@ -40,6 +40,54 @@ export interface Ledger {
   tasks: Task[];
 }
 
+/**
+ * 审计只记录「人对 AI 权力的决定」，不记工作流水：
+ * promote 批准一条候选进全局记忆 / revoke 撤回 / grant 改权限 / migrate 一次性迁移。
+ */
+export type AuditKind = "promote" | "revoke" | "grant" | "migrate";
+
+export interface AuditLine {
+  n?: number; // 显式编号（1 起）。由 appendAudit 分配，读旧文件时按行动态补
+  at: string;
+  session: string;
+  project: string;
+  kind: AuditKind;
+  target?: "global";
+  candidate?: string; // c1
+  source?: string; // "t4 / 2026-11-25"
+  text?: string;
+  reason?: string; // outdated | wrong | replaced | promoted
+  setting?: string; // grant 改的开关
+  from?: string | boolean;
+  to?: string | boolean;
+}
+
+/** 工作流水：只记形状（谁/何时/从什么变成什么），不记报告正文。 */
+export type EventKind = "open" | "dispatch" | "status" | "report";
+export interface EventLine {
+  at: string;
+  kind: EventKind;
+  taskId: string;
+  project: string;
+  session: string;
+  runId?: string;
+  from?: TaskStatus;
+  to?: TaskStatus;
+  report?: ReportStatus;
+  durMs?: number;
+}
+
+export type CandidateStatus = "open" | "approved" | "rejected";
+
+export interface Candidate {
+  id: string; // "c1"
+  text: string;
+  source: string; // 证据：任务 id / 日期
+  status: CandidateStatus;
+  at: string;
+  resolvedAt?: string;
+}
+
 export interface RouterConfig {
   scope: "global" | "project";
   home: string; // 绝对路径；"~" 已在 config.ts 展开
